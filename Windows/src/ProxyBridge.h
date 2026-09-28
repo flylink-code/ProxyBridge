@@ -42,6 +42,7 @@ typedef enum {
 PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password, BOOL send_domain_to_proxy);
 PROXYBRIDGE_API BOOL   ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password, BOOL send_domain_to_proxy);
 PROXYBRIDGE_API BOOL   ProxyBridge_DeleteProxyConfig(UINT32 config_id);
+PROXYBRIDGE_API BOOL   ProxyBridge_SetProxyUpstream(UINT32 config_id, UINT32 upstream_config_id);
 PROXYBRIDGE_API int    ProxyBridge_TestProxyConfig(UINT32 config_id, const char* target_host, UINT16 target_port, char* result_buffer, size_t buffer_size);
 // Detailed multi-step proxy check (like Proxifier's Proxy Checker). Streams human-readable
 // log lines through the callback: TCP reach, tunnel + auth, page load, latency, and - for

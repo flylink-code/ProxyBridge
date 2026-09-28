@@ -23,6 +23,7 @@ typedef void (*PBConnectionCallback)(const char* process_name, DWORD pid,
 typedef UINT32 (*PFN_AddProxyConfig)(PBProxyType, const char*, unsigned short, const char*, const char*, BOOL);
 typedef BOOL   (*PFN_EditProxyConfig)(UINT32, PBProxyType, const char*, unsigned short, const char*, const char*, BOOL);
 typedef BOOL   (*PFN_DeleteProxyConfig)(UINT32);
+typedef BOOL   (*PFN_SetProxyUpstream)(UINT32, UINT32);
 typedef int    (*PFN_TestProxyConfig)(UINT32, const char*, unsigned short, char*, size_t);
 typedef void   (*PBTestLogCallback)(const char* line, void* user);
 typedef int    (*PFN_TestProxyConfigEx)(UINT32, const char*, unsigned short, PBTestLogCallback, void*);
@@ -47,6 +48,7 @@ typedef struct {
     PFN_AddProxyConfig            AddProxyConfig;
     PFN_EditProxyConfig           EditProxyConfig;
     PFN_DeleteProxyConfig         DeleteProxyConfig;
+    PFN_SetProxyUpstream          SetProxyUpstream;
     PFN_TestProxyConfig           TestProxyConfig;
     PFN_TestProxyConfigEx         TestProxyConfigEx;
     PFN_AddRule                   AddRule;
@@ -89,6 +91,7 @@ static BOOL PB_Load(PBApi* api)
     PB_BIND(AddProxyConfig,           "AddProxyConfig");
     PB_BIND(EditProxyConfig,          "EditProxyConfig");
     PB_BIND(DeleteProxyConfig,        "DeleteProxyConfig");
+    api->SetProxyUpstream = (PFN_SetProxyUpstream)(void*)GetProcAddress(api->dll, "ProxyBridge_SetProxyUpstream");
     PB_BIND(TestProxyConfig,          "TestProxyConfig");
     PB_BIND(TestProxyConfigEx,        "TestProxyConfigEx");
     PB_BIND(AddRule,                  "AddRule");

@@ -218,8 +218,6 @@ static void PBConnCb(const char* proc, DWORD pid, const char* ip, unsigned short
 // profile apply / persist
 static void SaveActive(void) { PB_ProfileSave(g_activeProfile, &g_profile); }
 
-#include "ui/system_proxy_sync.h"
-
 static UINT32 ResolveNativeCfg(UINT32 storedId)
 {
     for (int i = 0; i < g_profile.cfgCount; i++)
@@ -236,13 +234,24 @@ static PBConfig* FindStoredConfig(UINT32 storedId)
     return NULL;
 }
 
+static BOOL ConfigDependsOnSystemProxy(const PBConfig* c, int depth)
+{
+    if (!c || depth > 4) return FALSE;
+    if (c->systemProxy) return TRUE;
+    if (c->upstreamStoredId == 0) return FALSE;
+    PBConfig* up = FindStoredConfig(c->upstreamStoredId);
+    return ConfigDependsOnSystemProxy(up, depth + 1);
+}
+
 static BOOL RuleSystemProxyUnavailable(const PBRule* r)
 {
     PBConfig* c = FindStoredConfig(r->cfgStoredId);
-    return _wcsicmp(r->action, L"PROXY") == 0 && c && c->systemProxy &&
+    return _wcsicmp(r->action, L"PROXY") == 0 && ConfigDependsOnSystemProxy(c, 0) &&
            (!g_systemProxyKnown || g_systemProxy.status != PB_SYSTEM_PROXY_OK ||
             !g_systemProxyApplied);
 }
+
+#include "ui/system_proxy_sync.h"
 
 static void ApplyConfigs(void)
 {
@@ -292,6 +301,19 @@ static void ApplyConfigs(void)
         c->nativeId = g_api.AddProxyConfig((PBProxyType)type, h, (unsigned short)_wtoi(c->port), u, p, c->sendDomain ? TRUE : FALSE);
         if (c->storedId == 0) c->storedId = c->nativeId;
         if (c->systemProxy && c->nativeId == 0) systemProxyApplied = FALSE;
+    }
+
+    if (g_api.SetProxyUpstream)
+    {
+        for (int i = 0; i < g_profile.cfgCount; i++)
+        {
+            PBConfig* c = &g_profile.cfg[i];
+            if (c->nativeId && c->upstreamStoredId)
+            {
+                UINT32 upNativeId = ResolveNativeCfg(c->upstreamStoredId);
+                g_api.SetProxyUpstream(c->nativeId, upNativeId);
+            }
+        }
     }
 
     g_systemProxyApplied = hasSystemProxy && systemProxyValid && systemProxyApplied;

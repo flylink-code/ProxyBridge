@@ -1,4 +1,5 @@
 #include "pb_internal.h"
+#include "pb_upstream.h"
 
 // Relay: TCP/UDP relay servers and per-connection worker threads.
 
@@ -575,7 +576,6 @@ DWORD WINAPI connection_handler(LPVOID arg)
     UINT8 dest_ip6[16];
     if (is_ipv6) memcpy(dest_ip6, config->orig_dest_ip6, 16);
     SOCKET socks_sock;
-    struct sockaddr_in socks_addr;
 
     free(config);
 
@@ -588,18 +588,11 @@ DWORD WINAPI connection_handler(LPVOID arg)
         return 1;
     }
 
-    // Connect to proxy, use cached resolved IP to avoid DNS per connection
-    UINT32 proxy_ip = proxy->resolved_ip ? proxy->resolved_ip : resolve_hostname(proxy->host);
-    if (proxy_ip == 0)
-    {
-        closesocket(client_sock);
-        return 1;
-    }
-
-    socks_sock = socket(AF_INET, SOCK_STREAM, 0);
+    // Connect to proxy (supports upstream chaining)
+    socks_sock = pb_connect_proxy_chain(proxy);
     if (socks_sock == INVALID_SOCKET)
     {
-        log_message("Socket creation failed (%d)", WSAGetLastError());
+        log_message("[RELAY] Failed to connect to proxy %s:%d (%d)", proxy->host, proxy->port, WSAGetLastError());
         closesocket(client_sock);
         return 0;
     }
@@ -610,21 +603,7 @@ DWORD WINAPI connection_handler(LPVOID arg)
     // the proxy's receive window fills up, which stalls the relay loop and
     // triggers TCP flow-control on the client side → massive upload throughput
     // loss.  4 MB gives plenty of headroom even at high bitrates / high RTT.
-    configure_tcp_socket(socks_sock, 4194304, 30000);  // 4 MB – proxy connection
     configure_tcp_socket(client_sock, 4194304, 30000); // 4 MB – app connection
-
-    memset(&socks_addr, 0, sizeof(socks_addr));
-    socks_addr.sin_family = AF_INET;
-    socks_addr.sin_addr.s_addr = proxy_ip;
-    socks_addr.sin_port = htons(proxy->port);
-
-    if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
-    {
-        log_message("[RELAY] Failed to connect to proxy %s:%d (%d)", proxy->host, proxy->port, WSAGetLastError());
-        closesocket(client_sock);
-        closesocket(socks_sock);
-        return 0;
-    }
 
     if (proxy->type == PROXY_TYPE_SOCKS5)
     {

@@ -339,6 +339,8 @@ BOOL establish_udp_associate_for_config(PROXY_CONFIG *cfg)
         return FALSE;
     if (cfg->type != PROXY_TYPE_SOCKS5)
         return FALSE;
+    if (cfg->upstream_config_id != 0)
+        return FALSE;
 
     // Prevent retry spam - only try every 1 second per config
     ULONGLONG now = GetTickCount64();

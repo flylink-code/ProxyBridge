@@ -181,6 +181,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 u2w(json_str(c, "Password", ""), cf->pass, 128);
                 cf->sendDomain = json_bool(c, "SendDomainToProxy", 1);   // default on
                 cf->systemProxy = json_bool(c, "UseSystemProxy", 0);
+                cf->upstreamStoredId = (UINT32)json_long(c, "UpstreamStoredId", 0);
             }
 
         JVal* rules = json_get(root, "ProxyRules");
@@ -253,7 +254,9 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
         put_kv_str(&b, "      ", "Username", c->user, ",\n");
         put_kv_str(&b, "      ", "Password", c->pass, ",\n");
         sb_put(&b, "      \"SendDomainToProxy\": "); sb_put(&b, c->sendDomain ? "true" : "false"); sb_put(&b, ",\n");
-        sb_put(&b, "      \"UseSystemProxy\": "); sb_put(&b, c->systemProxy ? "true" : "false"); sb_put(&b, "\n");
+        sb_put(&b, "      \"UseSystemProxy\": "); sb_put(&b, c->systemProxy ? "true" : "false"); sb_put(&b, ",\n");
+        snprintf(tmp, sizeof(tmp), "%u", c->upstreamStoredId);
+        sb_put(&b, "      \"UpstreamStoredId\": "); sb_put(&b, tmp); sb_put(&b, "\n");
         sb_put(&b, "    }");
     }
     sb_put(&b, p->cfgCount ? "\n  ],\n" : "],\n");

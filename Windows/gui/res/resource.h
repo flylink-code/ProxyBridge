@@ -88,6 +88,9 @@
 #define IDC_SE_L_NAME              337   // "Name:" label
 #define IDC_SE_SENDDOMAIN          328   // "let proxy resolve DNS" checkbox
 #define IDC_SE_SYSTEM             329   // use current Windows system proxy
+#define IDC_SE_UPSTREAM_CHECK      338   // "Route via upstream proxy" checkbox
+#define IDC_SE_UPSTREAM_COMBO      339   // upstream proxy dropdown
+#define IDC_SE_G_UPSTREAM          347   // "Upstream Proxy" group box
 
 // Proxy Checker dialog
 #define IDD_CHECKER                340

@@ -5,6 +5,10 @@
 // ProxyBridge.c (globals + lifecycle), pb_net.c, pb_rules.c, pb_conn.c.
 // Defines, structs, extern globals and cross-module prototypes live here.
 
+#ifndef PROXYBRIDGE_EXPORTS
+#define PROXYBRIDGE_EXPORTS
+#endif
+
 #include <winsock2.h>
 #include <windows.h>
 #include "ProxyBridge.h"
@@ -170,6 +174,7 @@ typedef struct {
     SOCKET udp_send_sock;
     struct sockaddr_in udp_relay_addr;
     BOOL udp_connected;
+    UINT32 upstream_config_id;  // 0 = direct connection, >0 = route through upstream proxy
 } PROXY_CONFIG;
 
 typedef BOOL (*token_match_func)(const char *token, const void *data);

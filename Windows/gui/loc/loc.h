@@ -38,6 +38,7 @@ enum {
     S_UPD_DONTASK, S_UPD_LATEST, S_UPD_ERR, S_UPD_DLING, S_UPD_DLFAIL,
     S_L_NAME, S_COL_NAME, S_CHK_SENDDOMAIN,
     S_CHK_SYSTEM_PROXY, S_SYSTEM_PROXY_NAME,
+    S_G_UPSTREAM, S_CHK_UPSTREAM, S_L_UPSTREAM_NONE, S_COL_UPSTREAM,
     S_COUNT
 };
 
@@ -197,6 +198,10 @@ static const wchar_t* const g_strings[S_COUNT][2] = {
     /* S_CHK_SENDDOMAIN     */ { L"Let proxy resolve DNS (send hostname)", L"由代理解析 DNS (发送主机名)" },
     /* S_CHK_SYSTEM_PROXY   */ { L"Use Windows system proxy", L"使用 Windows 系统代理" },
     /* S_SYSTEM_PROXY_NAME  */ { L"Windows System Proxy", L"Windows 系统代理" },
+    /* S_G_UPSTREAM         */ { L"Upstream Proxy (Chain)", L"前置代理 (链式代理)" },
+    /* S_CHK_UPSTREAM       */ { L"Route via upstream proxy", L"通过前置代理转发" },
+    /* S_L_UPSTREAM_NONE    */ { L"(Direct / No Upstream)", L"(直连 / 无前置代理)" },
+    /* S_COL_UPSTREAM       */ { L"Upstream", L"前置代理" },
 };
 
 static const wchar_t* T(int id) { return g_strings[id][g_lang ? 1 : 0]; }

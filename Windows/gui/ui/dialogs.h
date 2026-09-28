@@ -105,10 +105,12 @@ static void DarkListView(HWND lv, DWORD extraExStyle)
 static void InitServerList(HWND lv)
 {
     DarkListView(lv, 0);
-    struct { int s; int w; } cols[] = { {S_COL_NAME, 130}, {S_COL_ADDR, 160}, {S_COL_PORTS, 60}, {S_COL_TYPE, 80} };
+    struct { int s; int w; } cols[] = {
+        {S_COL_NAME, 110}, {S_COL_ADDR, 140}, {S_COL_PORTS, 55}, {S_COL_TYPE, 70}, {S_COL_UPSTREAM, 100}
+    };
     LVCOLUMNW c; c.mask = LVCF_TEXT | LVCF_WIDTH;
-    for (int i = 0; i < 4; i++) { c.pszText = (LPWSTR)T(cols[i].s); c.cx = cols[i].w; ListView_InsertColumn(lv, i, &c); }
-    FillColumns(lv, 4);
+    for (int i = 0; i < 5; i++) { c.pszText = (LPWSTR)T(cols[i].s); c.cx = cols[i].w; ListView_InsertColumn(lv, i, &c); }
+    FillColumns(lv, 5);
 }
 static void RefreshServerList(HWND lv)
 {
@@ -123,11 +125,25 @@ static void RefreshServerList(HWND lv)
         ListView_SetItemText(lv, i, 1, c->host[0] ? c->host : (LPWSTR)(c->systemProxy ? T(S_SYSTEM_PROXY_NAME) : L""));
         ListView_SetItemText(lv, i, 2, c->port);
         ListView_SetItemText(lv, i, 3, c->systemProxy ? (LPWSTR)T(S_SYSTEM_PROXY_NAME) : c->type);
+
+        const wchar_t* upText = L"-";
+        if (c->upstreamStoredId != 0)
+        {
+            PBConfig* up = FindStoredConfig(c->upstreamStoredId);
+            if (up)
+            {
+                if (up->name[0]) upText = up->name;
+                else if (up->systemProxy) upText = T(S_SYSTEM_PROXY_NAME);
+                else if (up->host[0]) upText = up->host;
+            }
+        }
+        ListView_SetItemText(lv, i, 4, (LPWSTR)upText);
     }
 }
 
-static void SetSystemProxyControls(HWND dlg, BOOL systemProxy)
+static void UpdateServerDialogControlStates(HWND dlg)
 {
+    BOOL systemProxy = IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED;
     const int manualControls[] = {
         IDC_SE_ADDR, IDC_SE_PORT, IDC_SE_PROTO, IDC_SE_AUTH,
         IDC_SE_USER, IDC_SE_PASS, IDC_SE_SENDDOMAIN
@@ -140,6 +156,21 @@ static void SetSystemProxyControls(HWND dlg, BOOL systemProxy)
         BOOL hasAuth = IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED;
         EnableWindow(GetDlgItem(dlg, IDC_SE_USER), hasAuth);
         EnableWindow(GetDlgItem(dlg, IDC_SE_PASS), hasAuth);
+    }
+
+    HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
+    int count = (int)SendMessageW(cbUp, CB_GETCOUNT, 0, 0);
+    if (systemProxy || count <= 0)
+    {
+        CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_UNCHECKED);
+        EnableWindow(GetDlgItem(dlg, IDC_SE_UPSTREAM_CHECK), FALSE);
+        EnableWindow(cbUp, FALSE);
+    }
+    else
+    {
+        EnableWindow(GetDlgItem(dlg, IDC_SE_UPSTREAM_CHECK), TRUE);
+        BOOL upChecked = IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) == BST_CHECKED;
+        EnableWindow(cbUp, upChecked);
     }
 }
 
@@ -165,6 +196,8 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_SE_SYSTEM,   T(S_CHK_SYSTEM_PROXY));
         SetDlgItemTextW(dlg, IDC_SE_L_USER,   T(S_L_USER));
         SetDlgItemTextW(dlg, IDC_SE_L_PASS,   T(S_L_PASS));
+        SetDlgItemTextW(dlg, IDC_SE_G_UPSTREAM, T(S_G_UPSTREAM));
+        SetDlgItemTextW(dlg, IDC_SE_UPSTREAM_CHECK, T(S_CHK_UPSTREAM));
         SetDlgItemTextW(dlg, IDOK,            T(S_BTN_OK));
         SetDlgItemTextW(dlg, IDCANCEL,        T(S_BTN_CANCEL));
         HWND pr = GetDlgItem(dlg, IDC_SE_PROTO);
@@ -180,7 +213,49 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         CheckDlgButton(dlg, IDC_SE_SYSTEM, c->systemProxy ? BST_CHECKED : BST_UNCHECKED);
         BOOL hasAuth = c->user[0] != 0;
         CheckDlgButton(dlg, IDC_SE_AUTH, hasAuth ? BST_CHECKED : BST_UNCHECKED);
-        SetSystemProxyControls(dlg, c->systemProxy != 0);
+
+        HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
+        SendMessageW(cbUp, CB_RESETCONTENT, 0, 0);
+        int selIdx = -1;
+        int addedCount = 0;
+        for (int i = 0; i < g_profile.cfgCount; i++)
+        {
+            PBConfig* candidate = &g_profile.cfg[i];
+            if (c->storedId != 0 && candidate->storedId == c->storedId)
+                continue;
+            if (c->storedId != 0 && ConfigChainContains(candidate->storedId, c->storedId, 0))
+                continue;
+
+            wchar_t itemText[256];
+            const wchar_t* name = candidate->name[0] ? candidate->name :
+                                  (candidate->systemProxy ? T(S_SYSTEM_PROXY_NAME) : candidate->host);
+            _snwprintf_s(itemText, ARRAYSIZE(itemText), _TRUNCATE, L"%s (%s:%s)",
+                         name, candidate->host[0] ? candidate->host : (candidate->systemProxy ? T(S_SYSTEM_PROXY_NAME) : L"-"),
+                         candidate->port[0] ? candidate->port : L"-");
+
+            int idx = (int)SendMessageW(cbUp, CB_ADDSTRING, 0, (LPARAM)itemText);
+            if (idx != CB_ERR)
+            {
+                SendMessageW(cbUp, CB_SETITEMDATA, idx, (LPARAM)candidate->storedId);
+                if (c->upstreamStoredId != 0 && candidate->storedId == c->upstreamStoredId)
+                    selIdx = idx;
+                addedCount++;
+            }
+        }
+
+        if (c->upstreamStoredId != 0 && selIdx >= 0)
+        {
+            CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_CHECKED);
+            SendMessageW(cbUp, CB_SETCURSEL, selIdx, 0);
+        }
+        else
+        {
+            CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_UNCHECKED);
+            if (addedCount > 0)
+                SendMessageW(cbUp, CB_SETCURSEL, 0, 0);
+        }
+
+        UpdateServerDialogControlStates(dlg);
         InitDarkMode(dlg);
         return TRUE;
     }
@@ -191,9 +266,9 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_SE_SYSTEM:
         {
             BOOL on = IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED;
-            SetSystemProxyControls(dlg, on);
             if (on)
             {
+                CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_UNCHECKED);
                 PBSystemProxy current = PB_QuerySystemProxy();
                 if (current.status == PB_SYSTEM_PROXY_OK)
                 {
@@ -202,19 +277,39 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_SETCURSEL, 1, 0);
                 }
             }
+            UpdateServerDialogControlStates(dlg);
+            return TRUE;
+        }
+        case IDC_SE_UPSTREAM_CHECK:
+        {
+            BOOL on = IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) == BST_CHECKED;
+            if (on)
+                CheckDlgButton(dlg, IDC_SE_SYSTEM, BST_UNCHECKED);
+            UpdateServerDialogControlStates(dlg);
             return TRUE;
         }
         case IDC_SE_AUTH:
         {
-            BOOL on = IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED;
-            EnableWindow(GetDlgItem(dlg, IDC_SE_USER), on);
-            EnableWindow(GetDlgItem(dlg, IDC_SE_PASS), on);
+            UpdateServerDialogControlStates(dlg);
             return TRUE;
         }
         case IDOK:
         {
             PBConfig* c = (PBConfig*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
             c->systemProxy = (IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED) ? 1 : 0;
+            if (c->systemProxy || IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) != BST_CHECKED)
+            {
+                c->upstreamStoredId = 0;
+            }
+            else
+            {
+                HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
+                int curSel = (int)SendMessageW(cbUp, CB_GETCURSEL, 0, 0);
+                if (curSel != CB_ERR)
+                    c->upstreamStoredId = (UINT32)SendMessageW(cbUp, CB_GETITEMDATA, curSel, 0);
+                else
+                    c->upstreamStoredId = 0;
+            }
             int isHttp = c->systemProxy ||
                          (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0) == 1;
             lstrcpynW(c->type, isHttp ? L"HTTP" : L"SOCKS5", 16);
@@ -365,7 +460,7 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         RefreshServerList(GetDlgItem(dlg, IDC_SV_LIST));
         return TRUE;
     case WM_SIZE:
-        FillColumns(GetDlgItem(dlg, IDC_SV_LIST), 4);
+        FillColumns(GetDlgItem(dlg, IDC_SV_LIST), 5);
         return FALSE;
     PB_DARK_CTLCOLORS;
     case WM_NOTIFY:
@@ -413,7 +508,22 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 else
                     id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
                                               h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
-                if (id > 0) { c.nativeId = id; c.storedId = id; g_profile.cfg[g_profile.cfgCount++] = c; g_systemProxyKnown = FALSE; g_systemProxyApplied = FALSE; SaveActive(); RefreshServerList(lv); SyncSystemProxy(); }
+                if (id > 0)
+                {
+                    c.nativeId = id;
+                    c.storedId = id;
+                    g_profile.cfg[g_profile.cfgCount++] = c;
+                    g_systemProxyKnown = FALSE;
+                    g_systemProxyApplied = FALSE;
+                    if (c.upstreamStoredId && g_api.SetProxyUpstream)
+                    {
+                        UINT32 upNativeId = ResolveNativeCfg(c.upstreamStoredId);
+                        g_api.SetProxyUpstream(c.nativeId, upNativeId);
+                    }
+                    SaveActive();
+                    RefreshServerList(lv);
+                    SyncSystemProxy();
+                }
                 else MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONERROR);
             }
             return TRUE;
@@ -459,6 +569,11 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     return TRUE;
                 }
                 g_profile.cfg[sel] = c;
+                if (g_api.SetProxyUpstream)
+                {
+                    UINT32 upNativeId = c.upstreamStoredId ? ResolveNativeCfg(c.upstreamStoredId) : 0;
+                    g_api.SetProxyUpstream(c.nativeId, upNativeId);
+                }
                 g_systemProxyKnown = FALSE; g_systemProxyApplied = FALSE;
                 SaveActive(); RefreshServerList(lv); SyncSystemProxy();
                 if (previous.systemProxy && !c.systemProxy)
@@ -479,7 +594,17 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         {
             int sel = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
             if (sel < 0 || sel >= g_profile.cfgCount) return TRUE;
+            UINT32 deletedStoredId = g_profile.cfg[sel].storedId;
             g_api.DeleteProxyConfig(g_profile.cfg[sel].nativeId);
+            for (int i = 0; i < g_profile.cfgCount; i++)
+            {
+                if (g_profile.cfg[i].upstreamStoredId == deletedStoredId)
+                {
+                    g_profile.cfg[i].upstreamStoredId = 0;
+                    if (g_profile.cfg[i].nativeId && g_api.SetProxyUpstream)
+                        g_api.SetProxyUpstream(g_profile.cfg[i].nativeId, 0);
+                }
+            }
             for (int i = sel; i < g_profile.cfgCount - 1; i++) g_profile.cfg[i] = g_profile.cfg[i + 1];
             g_profile.cfgCount--;
             g_systemProxyKnown = FALSE;

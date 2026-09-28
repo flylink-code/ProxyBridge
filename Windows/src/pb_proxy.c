@@ -1,4 +1,5 @@
 #include "pb_internal.h"
+#include "pb_upstream.h"
 
 // Proxy config: config store, lookup helpers, and management/test API.
 
@@ -135,11 +136,92 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteProxyConfig(UINT32 config_id)
                 memmove(&g_proxy_configs[i], &g_proxy_configs[i + 1], remaining * sizeof(PROXY_CONFIG));
 
             g_proxy_config_count--;
+
+            // Clean up any remaining configs that pointed to this deleted config as upstream
+            for (int j = 0; j < g_proxy_config_count; j++)
+            {
+                if (g_proxy_configs[j].upstream_config_id == config_id)
+                {
+                    g_proxy_configs[j].upstream_config_id = 0;
+                    log_message("Cleared upstream proxy for config ID %u due to deletion of config %u",
+                                g_proxy_configs[j].config_id, config_id);
+                }
+            }
+
             log_message("Deleted proxy config ID %u", config_id);
             return TRUE;
         }
     }
     return FALSE;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_SetProxyUpstream(UINT32 config_id, UINT32 upstream_config_id)
+{
+    if (config_id == 0) return FALSE;
+    if (config_id == upstream_config_id) return FALSE;
+
+    PROXY_CONFIG *cfg = NULL;
+    for (int i = 0; i < g_proxy_config_count; i++)
+    {
+        if (g_proxy_configs[i].config_id == config_id)
+        {
+            cfg = &g_proxy_configs[i];
+            break;
+        }
+    }
+    if (!cfg) return FALSE;
+
+    if (upstream_config_id == 0)
+    {
+        cfg->upstream_config_id = 0;
+        log_message("Cleared upstream proxy for config ID %u", config_id);
+        return TRUE;
+    }
+
+    // Verify that the upstream config actually exists
+    BOOL upstream_found = FALSE;
+    for (int i = 0; i < g_proxy_config_count; i++)
+    {
+        if (g_proxy_configs[i].config_id == upstream_config_id)
+        {
+            upstream_found = TRUE;
+            break;
+        }
+    }
+    if (!upstream_found) return FALSE;
+
+    // Detect loops and verify depth limit
+    UINT32 curr = upstream_config_id;
+    int depth = 1;
+    while (curr != 0)
+    {
+        if (curr == config_id)
+        {
+            log_message("Loop detected in proxy chain setting upstream %u for config %u", upstream_config_id, config_id);
+            return FALSE;
+        }
+        if (depth > MAX_PROXY_CHAIN_DEPTH)
+        {
+            log_message("Proxy chain depth exceeded limit (%d)", MAX_PROXY_CHAIN_DEPTH);
+            return FALSE;
+        }
+
+        UINT32 next = 0;
+        for (int i = 0; i < g_proxy_config_count; i++)
+        {
+            if (g_proxy_configs[i].config_id == curr)
+            {
+                next = g_proxy_configs[i].upstream_config_id;
+                break;
+            }
+        }
+        curr = next;
+        depth++;
+    }
+
+    cfg->upstream_config_id = upstream_config_id;
+    log_message("Set upstream proxy ID %u for config ID %u", upstream_config_id, config_id);
+    return TRUE;
 }
 
 PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* target_host, UINT16 target_port, char* result_buffer, size_t buffer_size)
@@ -160,39 +242,53 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
         return -1;
     }
 
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET)
+    SOCKET sock = INVALID_SOCKET;
+    if (cfg->upstream_config_id != 0)
     {
-        if (result_buffer && buffer_size > 0)
-            strncpy_s(result_buffer, buffer_size, "Failed to create socket", _TRUNCATE);
-        return -1;
+        sock = pb_connect_proxy_chain(cfg);
+        if (sock == INVALID_SOCKET)
+        {
+            if (result_buffer && buffer_size > 0)
+                strncpy_s(result_buffer, buffer_size, "Failed to connect to proxy through upstream chain", _TRUNCATE);
+            return -1;
+        }
     }
-
-    // Set timeout
-    DWORD timeout = 10000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
-
-    struct sockaddr_in proxy_addr;
-    memset(&proxy_addr, 0, sizeof(proxy_addr));
-    proxy_addr.sin_family = AF_INET;
-    proxy_addr.sin_port   = htons(cfg->port);
-    UINT32 proxy_ip = resolve_hostname(cfg->host);
-    if (proxy_ip == 0)
+    else
     {
-        closesocket(sock);
-        if (result_buffer && buffer_size > 0)
-            strncpy_s(result_buffer, buffer_size, "Failed to resolve proxy host", _TRUNCATE);
-        return -1;
-    }
-    proxy_addr.sin_addr.s_addr = proxy_ip;
+        sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET)
+        {
+            if (result_buffer && buffer_size > 0)
+                strncpy_s(result_buffer, buffer_size, "Failed to create socket", _TRUNCATE);
+            return -1;
+        }
 
-    if (connect(sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) != 0)
-    {
-        closesocket(sock);
-        if (result_buffer && buffer_size > 0)
-            strncpy_s(result_buffer, buffer_size, "Failed to connect to proxy", _TRUNCATE);
-        return -1;
+        // Set timeout
+        DWORD timeout = 10000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+
+        struct sockaddr_in proxy_addr;
+        memset(&proxy_addr, 0, sizeof(proxy_addr));
+        proxy_addr.sin_family = AF_INET;
+        proxy_addr.sin_port   = htons(cfg->port);
+        UINT32 proxy_ip = resolve_hostname(cfg->host);
+        if (proxy_ip == 0)
+        {
+            closesocket(sock);
+            if (result_buffer && buffer_size > 0)
+                strncpy_s(result_buffer, buffer_size, "Failed to resolve proxy host", _TRUNCATE);
+            return -1;
+        }
+        proxy_addr.sin_addr.s_addr = proxy_ip;
+
+        if (connect(sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) != 0)
+        {
+            closesocket(sock);
+            if (result_buffer && buffer_size > 0)
+                strncpy_s(result_buffer, buffer_size, "Failed to connect to proxy", _TRUNCATE);
+            return -1;
+        }
     }
 
     int result;
@@ -245,25 +341,54 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
     // ── Test 1: TCP connection to the proxy server ───────────────────────────
     TLOG("");
     TLOG("Test 1: Connection to the proxy server");
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) { TLOG("  [FAIL] Failed to create socket"); return -1; }
+    SOCKET s = INVALID_SOCKET;
     DWORD to = 10000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+    ULONGLONG connect_ms = 0;
     struct sockaddr_in paddr; memset(&paddr, 0, sizeof(paddr));
     paddr.sin_family = AF_INET; paddr.sin_port = htons(cfg->port); paddr.sin_addr.s_addr = proxy_ip;
-    ULONGLONG c0 = GetTickCount64();
-    if (connect(s, (struct sockaddr*)&paddr, sizeof(paddr)) != 0)
+
+    if (cfg->upstream_config_id != 0)
     {
-        TLOG("  [FAIL] Could not connect to the proxy server");
-        closesocket(s);
-        TLOG(""); TLOG("Testing finished: proxy is NOT reachable.");
-        return -1;
+        const PROXY_CONFIG *up = pb_find_proxy_config_exact(cfg->upstream_config_id);
+        if (up)
+            TLOG("  Chaining via upstream: ID %u (%s:%u)", up->config_id, up->host, up->port);
+        else
+            TLOG("  Chaining via upstream ID %u (not found)", cfg->upstream_config_id);
+
+        ULONGLONG c0 = GetTickCount64();
+        s = pb_connect_proxy_chain(cfg);
+        if (s == INVALID_SOCKET)
+        {
+            TLOG("  [FAIL] Could not establish connection through upstream chain");
+            TLOG(""); TLOG("Testing finished: upstream chain failed.");
+            return -1;
+        }
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+        ULONGLONG c1 = GetTickCount64();
+        connect_ms = c1 - c0;
+        TLOG("  Connection established through upstream (%llu ms)", connect_ms);
+        TLOG("  Test 1 passed");
     }
-    ULONGLONG c1 = GetTickCount64();
-    ULONGLONG connect_ms = c1 - c0;
-    TLOG("  Connection established (%llu ms)", connect_ms);
-    TLOG("  Test 1 passed");
+    else
+    {
+        s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) { TLOG("  [FAIL] Failed to create socket"); return -1; }
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+        ULONGLONG c0 = GetTickCount64();
+        if (connect(s, (struct sockaddr*)&paddr, sizeof(paddr)) != 0)
+        {
+            TLOG("  [FAIL] Could not connect to the proxy server");
+            closesocket(s);
+            TLOG(""); TLOG("Testing finished: proxy is NOT reachable.");
+            return -1;
+        }
+        ULONGLONG c1 = GetTickCount64();
+        connect_ms = c1 - c0;
+        TLOG("  Connection established (%llu ms)", connect_ms);
+        TLOG("  Test 1 passed");
+    }
 
     // ── Test 2: Connection through the proxy server ──────────────────────────
     TLOG("");
@@ -330,24 +455,31 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
     {
         TLOG("");
         TLOG("Test 4: SOCKS5 UDP ASSOCIATE support");
-        SOCKET us = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (us != INVALID_SOCKET)
+        if (cfg->upstream_config_id != 0)
         {
-            setsockopt(us, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
-            setsockopt(us, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
-            if (connect(us, (struct sockaddr*)&paddr, sizeof(paddr)) == 0)
+            TLOG("  Skipped: SOCKS5 UDP ASSOCIATE is not supported through upstream chaining");
+        }
+        else
+        {
+            SOCKET us = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (us != INVALID_SOCKET)
             {
-                struct sockaddr_in relay; memset(&relay, 0, sizeof(relay));
-                int urc = socks5_udp_associate_with_config(us, &relay, cfg);
-                if (urc == 0)
+                setsockopt(us, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+                setsockopt(us, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+                if (connect(us, (struct sockaddr*)&paddr, sizeof(paddr)) == 0)
                 {
-                    TLOG("  UDP ASSOCIATE granted; relay = %s:%u", inet_ntoa(relay.sin_addr), ntohs(relay.sin_port));
-                    TLOG("  UDP is supported by this proxy");
+                    struct sockaddr_in relay; memset(&relay, 0, sizeof(relay));
+                    int urc = socks5_udp_associate_with_config(us, &relay, cfg);
+                    if (urc == 0)
+                    {
+                        TLOG("  UDP ASSOCIATE granted; relay = %s:%u", inet_ntoa(relay.sin_addr), ntohs(relay.sin_port));
+                        TLOG("  UDP is supported by this proxy");
+                    }
+                    else TLOG("  UDP ASSOCIATE refused - this proxy does not support UDP");
                 }
-                else TLOG("  UDP ASSOCIATE refused - this proxy does not support UDP");
+                else TLOG("  Could not open a control connection for the UDP test");
+                closesocket(us);
             }
-            else TLOG("  Could not open a control connection for the UDP test");
-            closesocket(us);
         }
     }
 

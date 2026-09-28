@@ -42,11 +42,21 @@ static void LogSystemProxyStatus(const PBSystemProxy* value)
     }
 }
 
+static BOOL ConfigChainContains(UINT32 currentStoredId, UINT32 targetStoredId, int depth)
+{
+    if (currentStoredId == 0 || depth > 4) return FALSE;
+    if (currentStoredId == targetStoredId) return TRUE;
+    PBConfig* c = FindStoredConfig(currentStoredId);
+    if (!c || c->upstreamStoredId == 0) return FALSE;
+    return ConfigChainContains(c->upstreamStoredId, targetStoredId, depth + 1);
+}
+
 static BOOL RuleReferencesConfig(const PBRule* r, UINT32 storedId)
 {
-    return r->cfgStoredId == storedId ||
-           (r->cfgStoredId == 0 && g_profile.cfgCount > 0 &&
-            g_profile.cfg[0].storedId == storedId);
+    UINT32 target = r->cfgStoredId;
+    if (target == 0 && g_profile.cfgCount > 0)
+        target = g_profile.cfg[0].storedId;
+    return ConfigChainContains(target, storedId, 0);
 }
 
 static void DisableSystemProxyRules(UINT32 storedId)
@@ -148,9 +158,20 @@ static void SyncSystemProxy(void)
             applied = c->nativeId != 0;
         }
 
-        if (applied && !hadNativeConfig &&
-            !RebindSystemProxyRules(c->storedId, c->nativeId))
-            applied = FALSE;
+        if (applied && !hadNativeConfig)
+        {
+            if (!RebindSystemProxyRules(c->storedId, c->nativeId))
+                applied = FALSE;
+            else if (g_api.SetProxyUpstream)
+            {
+                for (int j = 0; j < g_profile.cfgCount; j++)
+                {
+                    PBConfig* sub = &g_profile.cfg[j];
+                    if (sub->nativeId && sub->upstreamStoredId == c->storedId)
+                        g_api.SetProxyUpstream(sub->nativeId, c->nativeId);
+                }
+            }
+        }
         if (!applied) g_systemProxyApplied = FALSE;
     }
 
