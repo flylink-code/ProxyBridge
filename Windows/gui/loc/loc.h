@@ -37,6 +37,7 @@ enum {
     S_M_UPDATE, S_UPD_TITLE, S_UPD_AVAIL, S_UPD_NOTES, S_UPD_NOW, S_UPD_LATER,
     S_UPD_DONTASK, S_UPD_LATEST, S_UPD_ERR, S_UPD_DLING, S_UPD_DLFAIL,
     S_L_NAME, S_COL_NAME, S_CHK_SENDDOMAIN,
+    S_CHK_SYSTEM_PROXY, S_SYSTEM_PROXY_NAME,
     S_COUNT
 };
 
@@ -194,6 +195,8 @@ static const wchar_t* const g_strings[S_COUNT][2] = {
     /* S_L_NAME             */ { L"Name:", L"名称:" },
     /* S_COL_NAME           */ { L"Name", L"名称" },
     /* S_CHK_SENDDOMAIN     */ { L"Let proxy resolve DNS (send hostname)", L"由代理解析 DNS (发送主机名)" },
+    /* S_CHK_SYSTEM_PROXY   */ { L"Use Windows system proxy", L"使用 Windows 系统代理" },
+    /* S_SYSTEM_PROXY_NAME  */ { L"Windows System Proxy", L"Windows 系统代理" },
 };
 
 static const wchar_t* T(int id) { return g_strings[id][g_lang ? 1 : 0]; }

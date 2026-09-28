@@ -4,10 +4,27 @@ param(
     [string]$Compiler = 'auto',
 
     [Parameter(Mandatory=$false)]
-    [switch]$NoSign
+    [switch]$NoSign,
+
+    [Parameter(Mandatory=$false)]
+    [string]$WinDivertPath = $(if ($env:PROXYBRIDGE_WINDIVERT) {
+        $env:PROXYBRIDGE_WINDIVERT
+    } elseif (Test-Path "H:\Tools\WinDivert-2.2.2-A") {
+        "H:\Tools\WinDivert-2.2.2-A"
+    } else {
+        "C:\WinDivert-2.2.2-A"
+    }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$GccPath = $(if ($env:PROXYBRIDGE_GCC) {
+        $env:PROXYBRIDGE_GCC
+    } elseif (Test-Path "H:\Tools\w64devkit\bin\gcc.exe") {
+        "H:\Tools\w64devkit\bin\gcc.exe"
+    } else {
+        "gcc"
+    })
 )
 
-$WinDivertPath = "C:\WinDivert-2.2.2-A"
 $SourcePath = "src"
 # Core split across modular translation units (see src\pb_internal.h).
 $SourceFile = "ProxyBridge.c pb_util.c pb_process.c pb_rules.c pb_proxy.c pb_dns.c pb_socks5.c pb_http.c pb_conntrack.c pb_relay.c"
@@ -20,18 +37,28 @@ $CertThumbprint = ""
 $TimestampServer = "http://timestamp.digicert.com"
 
 $Arch = if ([Environment]::Is64BitProcess) { "x64" } else { "x86" }
-Write-Host "Architecture: $Arch" -ForegroundColor Cyan
 
-if (Test-Path $OutputDir) {
-    Write-Host "Removing existing output directory..." -ForegroundColor Yellow
-    Remove-Item $OutputDir -Recurse -Force
+if ($GccPath -and $GccPath -notmatch '[\\/]') {
+    $gccCommand = Get-Command $GccPath -CommandType Application -ErrorAction SilentlyContinue
+    if ($gccCommand) { $GccPath = $gccCommand.Source }
+} elseif (Test-Path $GccPath) {
+    $GccPath = (Resolve-Path $GccPath).Path
 }
-Write-Host "Creating output directory: $OutputDir" -ForegroundColor Cyan
-New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+
+Write-Host "Architecture: $Arch" -ForegroundColor Cyan
+Write-Host "WinDivert path: $WinDivertPath" -ForegroundColor Cyan
+Write-Host "GCC path: $GccPath" -ForegroundColor Cyan
+
+if (-not (Test-Path $OutputDir)) {
+    Write-Host "Creating output directory: $OutputDir" -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+} else {
+    Write-Host "Using existing output directory: $OutputDir" -ForegroundColor Cyan
+}
 
 if (-not (Test-Path $WinDivertPath)) {
     Write-Host "ERROR: WinDivert not found at: $WinDivertPath" -ForegroundColor Red
-    Write-Host "Please update the path in this script or install WinDivert" -ForegroundColor Yellow
+    Write-Host "Install WinDivert or pass -WinDivertPath <path>" -ForegroundColor Yellow
     exit 1
 }
 
@@ -87,25 +114,33 @@ function Compile-MSVC {
 function Compile-GCC {
     Write-Host "`nCompiling DLL with GCC..." -ForegroundColor Green
 
-    $gccVersion = cmd /c gcc --version 2>&1
+    $gccVersion = & $GccPath --version 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "GCC not found in PATH" -ForegroundColor Yellow
+        Write-Host "GCC not found at: $GccPath" -ForegroundColor Yellow
         return $false
     }
 
     Write-Host "GCC found: $($gccVersion[0])" -ForegroundColor Cyan
 
-    $cmd = "gcc -shared -O2 -flto -s -Wall -D_WIN32_WINNT=0x0601 -DPROXYBRIDGE_EXPORTS " +
-           "-I`"$WinDivertPath\include`" " +
-           "$SourcePath\$SourceFile " +
-           "-L`"$WinDivertPath\$Arch`" " +
-           "-lWinDivert -lws2_32 -liphlpapi " +
-           "-o $OutputDLL"
+    $gccBin = Split-Path -Parent $GccPath
+    $originalPath = $env:PATH
+    $env:PATH = "$gccBin;$env:PATH"
 
-    Write-Host "Command: $cmd" -ForegroundColor Gray
+    $gccArgs = @(
+        '-shared', '-O2', '-s', '-Wall', '-D_WIN32_WINNT=0x0601', '-DPROXYBRIDGE_EXPORTS',
+        "-I$WinDivertPath\include"
+    )
+    foreach ($source in $SourceFile.Split(' ')) { $gccArgs += "$SourcePath\$source" }
+    $gccArgs += "-L$WinDivertPath\$Arch", '-lWinDivert', '-lws2_32', '-liphlpapi', '-o', $OutputDLL
 
-    $result = cmd /c $cmd '2>&1'
-    $exitCode = $LASTEXITCODE
+    Write-Host "Command: $GccPath $($gccArgs -join ' ')" -ForegroundColor Gray
+
+    try {
+        $result = & $GccPath @gccArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $env:PATH = $originalPath
+    }
 
     Write-Host $result
 
@@ -153,6 +188,7 @@ function Sign-Binary {
 
 
 $success = $false
+$builtWithGcc = $false
 
 if ($Compiler -eq 'auto') {
     Write-Host "Auto-detecting compiler..." -ForegroundColor Cyan
@@ -162,11 +198,17 @@ if ($Compiler -eq 'auto') {
     if (-not $success) {
         Write-Host "`nMSVC compilation failed, trying GCC..." -ForegroundColor Yellow
         $success = Compile-GCC
+        $builtWithGcc = $success
+        if ($success) {
+            $script:foundVcvarsPath = $null
+            $script:foundArch = $null
+        }
     }
 } elseif ($Compiler -eq 'msvc') {
     $success = Compile-MSVC
 } elseif ($Compiler -eq 'gcc') {
     $success = Compile-GCC
+    $builtWithGcc = $success
 }
 
 
@@ -182,26 +224,36 @@ if ($success) {
         }
     }
 
+    $requiredRuntimeFiles = @(
+        "$WinDivertPath\$Arch\WinDivert.dll",
+        "$WinDivertPath\$Arch\WinDivert64.sys"
+    )
+    foreach ($file in $requiredRuntimeFiles) {
+        if (-not (Test-Path $file)) {
+            Write-Host "ERROR: Required WinDivert runtime file not found: $file" -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    foreach ($fileName in @('ProxyBridge.exe', 'ProxyBridgeCore.dll', 'ProxyBridge_CLI.exe',
+                             'WinDivert.dll', 'WinDivert32.sys', 'WinDivert64.sys')) {
+        Remove-Item (Join-Path $OutputDir $fileName) -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Host "`nMoving files to output directory..." -ForegroundColor Green
     Move-Item $OutputDLL -Destination $OutputDir -Force
     Write-Host "  Moved: $OutputDLL -> $OutputDir\" -ForegroundColor Gray
 
-    $files = @(
-        "$WinDivertPath\$Arch\WinDivert.dll",
-        "$WinDivertPath\$Arch\WinDivert64.sys",
-        "$WinDivertPath\$Arch\WinDivert32.sys"
-    )
-    foreach ($file in $files) {
-        if (Test-Path $file) {
-            Copy-Item $file -Destination $OutputDir -Force
-            Write-Host "  Copied: $(Split-Path $file -Leaf)" -ForegroundColor Gray
-        }
+    foreach ($file in $requiredRuntimeFiles) {
+        Copy-Item $file -Destination $OutputDir -Force
+        Write-Host "  Copied: $(Split-Path $file -Leaf)" -ForegroundColor Gray
     }
 
-    # ── C GUI (MSVC) ─────────────────────────────────────────────────────────
-    # Single self-contained ProxyBridge.exe (~0.5 MB, static CRT) that loads
-    # ProxyBridgeCore.dll from its own folder. No extra runtime or DLLs.
-    Write-Host "`nBuilding C GUI (MSVC)..." -ForegroundColor Green
+    # ── C GUI ──────────────────────────────────────────────────────────────────
+    # Single self-contained ProxyBridge.exe that loads ProxyBridgeCore.dll from
+    # its own folder. Prefer MSVC when available; otherwise use w64devkit/MinGW.
+    Write-Host "`nBuilding C GUI..." -ForegroundColor Green
+    $guiBuilt = $false
     if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
         # Production build. Compiler: size-optimized static-CRT release with the security
         # hardening set - /GS (stack cookies), /guard:cf (Control Flow Guard), /sdl (extra
@@ -214,7 +266,7 @@ if ($success) {
                      "/Fe:ProxyBridge.exe " +
                      "/link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /RELEASE " +
                      "/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT " +
-                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib"
+                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib wininet.lib"
 
         # Sources live in subfolders. rc runs from res\ so app.rc's relative paths
         # (resource.h, app.manifest, logo.ico) resolve; it writes app.res back to gui\.
@@ -227,18 +279,64 @@ if ($success) {
 
         if ($guiExit -eq 0 -and (Test-Path "gui\ProxyBridge.exe")) {
             Move-Item "gui\ProxyBridge.exe" -Destination $OutputDir -Force
-            Write-Host "  C GUI built: ProxyBridge.exe" -ForegroundColor Gray
+            Write-Host "  C GUI built with MSVC: ProxyBridge.exe" -ForegroundColor Gray
             Remove-Item "gui\*.obj","gui\app.res" -Force -ErrorAction SilentlyContinue
+            $guiBuilt = $true
         } else {
             Write-Host "  C GUI build failed!" -ForegroundColor Red
             Write-Host $guiOut
         }
+    } elseif ($builtWithGcc) {
+        $gccBin = Split-Path -Parent $GccPath
+        $windresPath = Join-Path $gccBin "windres.exe"
+        if (-not (Test-Path $windresPath)) {
+            Write-Host "  windres not found at: $windresPath" -ForegroundColor Red
+        } else {
+            $originalPath = $env:PATH
+            $env:PATH = "$gccBin;$env:PATH"
+            try {
+                Push-Location "gui\res"
+                $resourceOut = & $windresPath '-O' 'coff' 'app.rc' '..\app-gcc.res' 2>&1
+                $resourceExit = $LASTEXITCODE
+                Pop-Location
+
+                if ($resourceExit -eq 0) {
+                    $guiGccArgs = @(
+                        '-O2', '-s', '-Wall', '-municode', '-mwindows',
+                        '-DUNICODE', '-D_UNICODE', '-D_WIN32_WINNT=0x0601', '-DNDEBUG',
+                        'gui\main.c', 'gui\profile\profile.c', 'gui\app-gcc.res',
+                        '-luser32', '-lgdi32', '-lcomctl32', '-lshell32', '-lcomdlg32',
+                        '-lwinhttp', '-lwininet', '-ldwmapi', '-luxtheme',
+                        '-o', "$OutputDir\ProxyBridge.exe"
+                    )
+                    Write-Host "Command: $GccPath $($guiGccArgs -join ' ')" -ForegroundColor Gray
+                    $guiOut = & $GccPath @guiGccArgs 2>&1
+                    $guiExit = $LASTEXITCODE
+                } else {
+                    $guiOut = $resourceOut
+                    $guiExit = $resourceExit
+                }
+            } finally {
+                if ((Get-Location).Path -like '*\gui\res') { Pop-Location }
+                $env:PATH = $originalPath
+                Remove-Item "gui\app-gcc.res" -Force -ErrorAction SilentlyContinue
+            }
+
+            if ($guiExit -eq 0 -and (Test-Path "$OutputDir\ProxyBridge.exe")) {
+                Write-Host "  C GUI built with GCC: ProxyBridge.exe" -ForegroundColor Gray
+                $guiBuilt = $true
+            } else {
+                Write-Host "  C GUI build failed!" -ForegroundColor Red
+                Write-Host $guiOut
+            }
+        }
     } else {
-        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+        Write-Host "  Skipped: no supported compiler found" -ForegroundColor Yellow
     }
 
     # ── Build CLI ────────────────────────────────────────────────────────────
     Write-Host "`nBuilding CLI..." -ForegroundColor Green
+    $cliBuilt = $false
     if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
         $cliArgs = "/nologo /O2 /Ot /GL /Gy /W4 /wd4100 /wd4189 /wd4267 /wd4244 /wd4996 " +
                    "/D_WINSOCK_DEPRECATED_NO_WARNINGS /D_WIN32_WINNT=0x0601 /DNDEBUG " +
@@ -254,14 +352,43 @@ if ($success) {
         $cliOut = cmd /c $cliCmd '2>&1'
         if ($LASTEXITCODE -eq 0) {
             Move-Item "ProxyBridge_CLI.exe" -Destination $OutputDir -Force
-            Write-Host "  CLI built: ProxyBridge_CLI.exe" -ForegroundColor Gray
+            Write-Host "  CLI built with MSVC: ProxyBridge_CLI.exe" -ForegroundColor Gray
             Remove-Item "*.obj" -Force -ErrorAction SilentlyContinue
+            $cliBuilt = $true
+        } else {
+            Write-Host "  CLI build failed!" -ForegroundColor Red
+            Write-Host $cliOut
+        }
+    } elseif ($builtWithGcc) {
+        $gccBin = Split-Path -Parent $GccPath
+        $originalPath = $env:PATH
+        $env:PATH = "$gccBin;$env:PATH"
+        $cliGccArgs = @(
+            '-O2', '-s', '-Wall', '-D_WIN32_WINNT=0x0601', '-DNDEBUG',
+            'cli\main.c', '-lwinhttp', '-lshell32', '-ladvapi32',
+            '-o', "$OutputDir\ProxyBridge_CLI.exe"
+        )
+        Write-Host "Command: $GccPath $($cliGccArgs -join ' ')" -ForegroundColor Gray
+        try {
+            $cliOut = & $GccPath @cliGccArgs 2>&1
+            $cliExit = $LASTEXITCODE
+        } finally {
+            $env:PATH = $originalPath
+        }
+        if ($cliExit -eq 0 -and (Test-Path "$OutputDir\ProxyBridge_CLI.exe")) {
+            Write-Host "  CLI built with GCC: ProxyBridge_CLI.exe" -ForegroundColor Gray
+            $cliBuilt = $true
         } else {
             Write-Host "  CLI build failed!" -ForegroundColor Red
             Write-Host $cliOut
         }
     } else {
-        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
+        Write-Host "  Skipped: no supported compiler found" -ForegroundColor Yellow
+    }
+
+    if (-not $guiBuilt -or -not $cliBuilt) {
+        Write-Host "`nBuild incomplete: core succeeded, but GUI or CLI failed." -ForegroundColor Red
+        exit 1
     }
 
     if (-not $NoSign) {

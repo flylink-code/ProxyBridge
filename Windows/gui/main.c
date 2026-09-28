@@ -26,7 +26,7 @@
 #include "api/pb_api.h"
 #include "profile/profile.h"
 #include "loc/loc.h"
-
+#include "system_proxy.h"
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -106,6 +106,7 @@ typedef struct {
 } LogStore;
 static LogStore g_connStore, g_actStore;
 #define TIMER_LOG 1                // batched log-flush timer
+#define TIMER_SYSTEM_PROXY 2       // refresh the endpoint selected by Windows/VPN
 static int g_idleTicks = 0;        // consecutive idle flushes (for working-set trim)
 static HFONT     g_hMono, g_hUi;
 static HINSTANCE g_hInst;
@@ -114,6 +115,9 @@ static BOOL      g_trayAdded = FALSE;
 static UINT      g_wmTaskbarCreated = 0;   // shell broadcast when the taskbar reappear
 static BOOL      g_reallyExit = FALSE;
 static BOOL      g_started = FALSE;
+static PBSystemProxy g_systemProxy;
+static BOOL      g_systemProxyKnown = FALSE;
+static BOOL      g_systemProxyApplied = FALSE;
 
 static PBProfile g_profile;
 static wchar_t   g_activeProfile[PB_NAME_MAX] = L"Default";
@@ -214,6 +218,8 @@ static void PBConnCb(const char* proc, DWORD pid, const char* ip, unsigned short
 // profile apply / persist
 static void SaveActive(void) { PB_ProfileSave(g_activeProfile, &g_profile); }
 
+#include "ui/system_proxy_sync.h"
+
 static UINT32 ResolveNativeCfg(UINT32 storedId)
 {
     for (int i = 0; i < g_profile.cfgCount; i++)
@@ -221,17 +227,74 @@ static UINT32 ResolveNativeCfg(UINT32 storedId)
     return 0; // 0 => DLL uses first available config
 }
 
+static PBConfig* FindStoredConfig(UINT32 storedId)
+{
+    if (storedId == 0)
+        return g_profile.cfgCount > 0 ? &g_profile.cfg[0] : NULL;
+    for (int i = 0; i < g_profile.cfgCount; i++)
+        if (g_profile.cfg[i].storedId == storedId) return &g_profile.cfg[i];
+    return NULL;
+}
+
+static BOOL RuleSystemProxyUnavailable(const PBRule* r)
+{
+    PBConfig* c = FindStoredConfig(r->cfgStoredId);
+    return _wcsicmp(r->action, L"PROXY") == 0 && c && c->systemProxy &&
+           (!g_systemProxyKnown || g_systemProxy.status != PB_SYSTEM_PROXY_OK ||
+            !g_systemProxyApplied);
+}
+
 static void ApplyConfigs(void)
 {
+    PBSystemProxy systemProxy;
+    BOOL systemProxyRead = FALSE;
+    BOOL systemProxyValid = FALSE;
+    BOOL systemProxyApplied = TRUE;
+    BOOL hasSystemProxy = FALSE;
+
     for (int i = 0; i < g_profile.cfgCount; i++)
     {
         PBConfig* c = &g_profile.cfg[i];
+        if (c->systemProxy)
+        {
+            hasSystemProxy = TRUE;
+            if (!systemProxyRead)
+            {
+                systemProxyValid = ReadSystemProxy(&systemProxy);
+                g_systemProxy = systemProxy;
+                g_systemProxyKnown = TRUE;
+                systemProxyRead = TRUE;
+                LogSystemProxyStatus(&systemProxy);
+            }
+            if (!systemProxyValid)
+            {
+                // Keep a stable native config ID so rules never fall back to another proxy.
+                // Its rules are disabled below until a real system endpoint appears.
+                lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
+                char placeholderHost[] = "127.0.0.1";
+                c->nativeId = g_api.AddProxyConfig(PB_PROXY_HTTP, placeholderHost, 1,
+                                                   "", "", c->sendDomain ? TRUE : FALSE);
+                if (c->storedId == 0) c->storedId = c->nativeId;
+                if (c->nativeId == 0) systemProxyApplied = FALSE;
+                continue;
+            }
+
+            lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
+            lstrcpynW(c->host, systemProxy.host, ARRAYSIZE(c->host));
+            _snwprintf_s(c->port, ARRAYSIZE(c->port), _TRUNCATE, L"%u", systemProxy.port);
+        }
+
         int type = (_wcsicmp(c->type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
         char h[256], u[256], p[256];
-        W2Ux(c->host, h, sizeof(h)); W2Ux(c->user, u, sizeof(u)); W2Ux(c->pass, p, sizeof(p));
+        W2Ux(c->host, h, sizeof(h));
+        if (c->systemProxy) { u[0] = 0; p[0] = 0; }
+        else { W2Ux(c->user, u, sizeof(u)); W2Ux(c->pass, p, sizeof(p)); }
         c->nativeId = g_api.AddProxyConfig((PBProxyType)type, h, (unsigned short)_wtoi(c->port), u, p, c->sendDomain ? TRUE : FALSE);
         if (c->storedId == 0) c->storedId = c->nativeId;
+        if (c->systemProxy && c->nativeId == 0) systemProxyApplied = FALSE;
     }
+
+    g_systemProxyApplied = hasSystemProxy && systemProxyValid && systemProxyApplied;
 }
 
 static void ApplyRules(void)
@@ -245,7 +308,8 @@ static void ApplyRules(void)
         r->nativeId = g_api.AddRule(proc, hosts, ports, domains,
                                     (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
                                     ResolveNativeCfg(r->cfgStoredId));
-        if (r->nativeId && !r->enabled) g_api.DisableRule(r->nativeId);
+        if (r->nativeId && (!r->enabled || RuleSystemProxyUnavailable(r)))
+            g_api.DisableRule(r->nativeId);
     }
 }
 
@@ -258,7 +322,7 @@ static UINT32 EngineAddRule(PBRule* r)
     UINT32 id = g_api.AddRule(proc, hosts, ports, domains,
                               (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
                               ResolveNativeCfg(r->cfgStoredId));
-    if (id && !r->enabled) g_api.DisableRule(id);
+    if (id && (!r->enabled || RuleSystemProxyUnavailable(r))) g_api.DisableRule(id);
     return id;
 }
 // Edit an existing rule in place - keeps the same native id and list position.
@@ -270,7 +334,8 @@ static void EngineEditRule(PBRule* r)
     g_api.EditRule(r->nativeId, proc, hosts, ports, domains,
                    (PBRuleProtocol)ProtoIdx(r->proto), (PBRuleAction)ActionIdx(r->action),
                    ResolveNativeCfg(r->cfgStoredId));
-    if (r->enabled) g_api.EnableRule(r->nativeId); else g_api.DisableRule(r->nativeId);
+    if (r->enabled && !RuleSystemProxyUnavailable(r)) g_api.EnableRule(r->nativeId);
+    else g_api.DisableRule(r->nativeId);
 }
 
 static void UnapplyProfile(void)
@@ -292,6 +357,8 @@ static void SwitchToProfile(const wchar_t* name)
     ApplyFilterSnapshot();
     g_api.SetLocalhostViaProxy(g_localhost);
     g_api.SetTrafficLoggingEnabled(g_trafficLog);
+    g_systemProxyKnown = FALSE;
+    g_systemProxyApplied = FALSE;
     ApplyConfigs();
     ApplyRules();
     SyncMenuChecks(g_hMain);
@@ -580,6 +647,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         LogStoreInit(&g_connStore, g_hConnLog);
         LogStoreInit(&g_actStore,  g_hActLog);
         SetTimer(hwnd, TIMER_LOG, 200, NULL);   // batch log updates ~5x/sec
+        SetTimer(hwnd, TIMER_SYSTEM_PROXY, 1000, NULL);
 
         // Menu-bar quick-access icons are drawn on the (non-client) menu bar in WM_NCPAINT;
         // this is their glyph font. The menu-bar font is used to owner-draw the top-level
@@ -742,6 +810,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (processed == 0) { if (++g_idleTicks == 10) SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1); }
             else g_idleTicks = 0;
         }
+        else if (wp == TIMER_SYSTEM_PROXY && g_started)
+            SyncSystemProxy();
         return 0;
     case WM_APP_UPDATE:
     {
@@ -897,6 +967,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_api.Stop) g_api.Stop();
         TrayRemove();
         KillTimer(hwnd, TIMER_LOG);
+        KillTimer(hwnd, TIMER_SYSTEM_PROXY);
         LogStoreFree(&g_connStore);    // release buffered + pending log lines + the lock
         LogStoreFree(&g_actStore);
         if (g_hMono) DeleteObject(g_hMono);

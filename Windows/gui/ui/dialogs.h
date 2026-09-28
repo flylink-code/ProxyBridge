@@ -6,6 +6,10 @@
 #ifndef PB_UI_DIALOGS_H
 #define PB_UI_DIALOGS_H
 
+#ifndef LM_GETIDEALSIZE
+#define LM_GETIDEALSIZE (WM_USER + 0x0301)
+#endif
+
 // Subclass a ListView to (a) dark-theme its header via custom draw - it stays light
 // otherwise - and (b) the header's empty right-hand area gets filled dark too.
 static LRESULT CALLBACK ListDarkSubProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref)
@@ -113,11 +117,29 @@ static void RefreshServerList(HWND lv)
     {
         PBConfig* c = &g_profile.cfg[i];
         LVITEMW it; ZeroMemory(&it, sizeof(it));
-        it.mask = LVIF_TEXT; it.iItem = i; it.pszText = c->name[0] ? c->name : c->host;
+        it.mask = LVIF_TEXT; it.iItem = i;
+        it.pszText = c->name[0] ? c->name : (LPWSTR)(c->systemProxy ? T(S_SYSTEM_PROXY_NAME) : c->host);
         ListView_InsertItem(lv, &it);
-        ListView_SetItemText(lv, i, 1, c->host);
+        ListView_SetItemText(lv, i, 1, c->host[0] ? c->host : (LPWSTR)(c->systemProxy ? T(S_SYSTEM_PROXY_NAME) : L""));
         ListView_SetItemText(lv, i, 2, c->port);
-        ListView_SetItemText(lv, i, 3, c->type);
+        ListView_SetItemText(lv, i, 3, c->systemProxy ? (LPWSTR)T(S_SYSTEM_PROXY_NAME) : c->type);
+    }
+}
+
+static void SetSystemProxyControls(HWND dlg, BOOL systemProxy)
+{
+    const int manualControls[] = {
+        IDC_SE_ADDR, IDC_SE_PORT, IDC_SE_PROTO, IDC_SE_AUTH,
+        IDC_SE_USER, IDC_SE_PASS, IDC_SE_SENDDOMAIN
+    };
+    for (size_t i = 0; i < ARRAYSIZE(manualControls); i++)
+        EnableWindow(GetDlgItem(dlg, manualControls[i]), !systemProxy);
+
+    if (!systemProxy)
+    {
+        BOOL hasAuth = IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED;
+        EnableWindow(GetDlgItem(dlg, IDC_SE_USER), hasAuth);
+        EnableWindow(GetDlgItem(dlg, IDC_SE_PASS), hasAuth);
     }
 }
 
@@ -140,6 +162,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_SE_L_PROTO,  T(S_L_PROTO));
         SetDlgItemTextW(dlg, IDC_SE_AUTH,     T(S_CHK_ENABLE));
         SetDlgItemTextW(dlg, IDC_SE_SENDDOMAIN, T(S_CHK_SENDDOMAIN));
+        SetDlgItemTextW(dlg, IDC_SE_SYSTEM,   T(S_CHK_SYSTEM_PROXY));
         SetDlgItemTextW(dlg, IDC_SE_L_USER,   T(S_L_USER));
         SetDlgItemTextW(dlg, IDC_SE_L_PASS,   T(S_L_PASS));
         SetDlgItemTextW(dlg, IDOK,            T(S_BTN_OK));
@@ -154,10 +177,10 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_SE_USER, c->user);
         SetDlgItemTextW(dlg, IDC_SE_PASS, c->pass);
         CheckDlgButton(dlg, IDC_SE_SENDDOMAIN, c->sendDomain ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, IDC_SE_SYSTEM, c->systemProxy ? BST_CHECKED : BST_UNCHECKED);
         BOOL hasAuth = c->user[0] != 0;
         CheckDlgButton(dlg, IDC_SE_AUTH, hasAuth ? BST_CHECKED : BST_UNCHECKED);
-        EnableWindow(GetDlgItem(dlg, IDC_SE_USER), hasAuth);
-        EnableWindow(GetDlgItem(dlg, IDC_SE_PASS), hasAuth);
+        SetSystemProxyControls(dlg, c->systemProxy != 0);
         InitDarkMode(dlg);
         return TRUE;
     }
@@ -165,6 +188,22 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND:
         switch (LOWORD(wp))
         {
+        case IDC_SE_SYSTEM:
+        {
+            BOOL on = IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED;
+            SetSystemProxyControls(dlg, on);
+            if (on)
+            {
+                PBSystemProxy current = PB_QuerySystemProxy();
+                if (current.status == PB_SYSTEM_PROXY_OK)
+                {
+                    SetDlgItemTextW(dlg, IDC_SE_ADDR, current.host);
+                    SetDlgItemInt(dlg, IDC_SE_PORT, current.port, FALSE);
+                    SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_SETCURSEL, 1, 0);
+                }
+            }
+            return TRUE;
+        }
         case IDC_SE_AUTH:
         {
             BOOL on = IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED;
@@ -175,20 +214,42 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDOK:
         {
             PBConfig* c = (PBConfig*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-            int isHttp = (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0) == 1;
+            c->systemProxy = (IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED) ? 1 : 0;
+            int isHttp = c->systemProxy ||
+                         (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0) == 1;
             lstrcpynW(c->type, isHttp ? L"HTTP" : L"SOCKS5", 16);
             GetDlgItemTextW(dlg, IDC_SE_NAME, c->name, 128);
             GetDlgItemTextW(dlg, IDC_SE_ADDR, c->host, 128);
             c->sendDomain = (IsDlgButtonChecked(dlg, IDC_SE_SENDDOMAIN) == BST_CHECKED) ? 1 : 0;
-            if (!c->name[0]) lstrcpynW(c->name, c->host[0] ? c->host : L"Proxy Server", 128);
+            if (!c->name[0])
+                lstrcpynW(c->name, c->systemProxy ? T(S_SYSTEM_PROXY_NAME) :
+                                      (c->host[0] ? c->host : L"Proxy Server"), 128);
             GetDlgItemTextW(dlg, IDC_SE_PORT, c->port, 16);
-            if (IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED)
+            if (IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED && !c->systemProxy)
             {
                 GetDlgItemTextW(dlg, IDC_SE_USER, c->user, 128);
                 GetDlgItemTextW(dlg, IDC_SE_PASS, c->pass, 128);
             }
             else { c->user[0] = 0; c->pass[0] = 0; }
-            if (!c->host[0]) { MessageBoxW(dlg, T(S_ERR_HOST), APP_TITLE, MB_OK | MB_ICONWARNING); return TRUE; }
+            if (c->systemProxy)
+            {
+                PBSystemProxy current = PB_QuerySystemProxy();
+                if (current.status == PB_SYSTEM_PROXY_OK)
+                {
+                    lstrcpynW(c->host, current.host, ARRAYSIZE(c->host));
+                    _snwprintf_s(c->port, ARRAYSIZE(c->port), _TRUNCATE, L"%u", current.port);
+                }
+                c->type[0] = L'H'; c->type[1] = L'T'; c->type[2] = L'T';
+                c->type[3] = L'P'; c->type[4] = 0;
+                c->user[0] = 0;
+                c->pass[0] = 0;
+                if (!c->name[0]) lstrcpynW(c->name, T(S_SYSTEM_PROXY_NAME), ARRAYSIZE(c->name));
+            }
+            if (!c->systemProxy && !c->host[0])
+            {
+                MessageBoxW(dlg, T(S_ERR_HOST), APP_TITLE, MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
             EndDialog(dlg, 1);
             return TRUE;
         }
@@ -328,9 +389,31 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_SERVER), dlg, ServerEditDlgProc, (LPARAM)&c) == 1)
             {
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
-                UINT32 id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
-                                                 h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
-                if (id > 0) { c.nativeId = id; c.storedId = id; g_profile.cfg[g_profile.cfgCount++] = c; SaveActive(); RefreshServerList(lv); }
+                UINT32 id = 0;
+                if (c.systemProxy)
+                {
+                    PBSystemProxy current = PB_QuerySystemProxy();
+                    if (current.status == PB_SYSTEM_PROXY_OK)
+                    {
+                        lstrcpynW(c.type, L"HTTP", ARRAYSIZE(c.type));
+                        lstrcpynW(c.host, current.host, ARRAYSIZE(c.host));
+                        _snwprintf_s(c.port, ARRAYSIZE(c.port), _TRUNCATE, L"%u", current.port);
+                        W2Ux(c.host, h, sizeof(h));
+                        id = g_api.AddProxyConfig(PB_PROXY_HTTP, h, current.port, "", "",
+                                                  c.sendDomain ? TRUE : FALSE);
+                    }
+                    else
+                    {
+                        // Keep a stable native ID while the VPN is offline; SyncSystemProxy
+                        // will replace this placeholder when a real endpoint appears.
+                        id = g_api.AddProxyConfig(PB_PROXY_HTTP, "127.0.0.1", 1, "", "",
+                                                  c.sendDomain ? TRUE : FALSE);
+                    }
+                }
+                else
+                    id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
+                                              h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
+                if (id > 0) { c.nativeId = id; c.storedId = id; g_profile.cfg[g_profile.cfgCount++] = c; g_systemProxyKnown = FALSE; g_systemProxyApplied = FALSE; SaveActive(); RefreshServerList(lv); SyncSystemProxy(); }
                 else MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONERROR);
             }
             return TRUE;
@@ -339,14 +422,47 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         {
             int sel = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
             if (sel < 0 || sel >= g_profile.cfgCount) return TRUE;
-            PBConfig c = g_profile.cfg[sel];
+            PBConfig previous = g_profile.cfg[sel];
+            PBConfig c = previous;
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_SERVER), dlg, ServerEditDlgProc, (LPARAM)&c) == 1)
             {
-                g_profile.cfg[sel] = c;
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
-                g_api.EditProxyConfig(c.nativeId, (_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
-                                      h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
-                SaveActive(); RefreshServerList(lv);
+                BOOL edited;
+                if (c.systemProxy)
+                {
+                    PBSystemProxy current = PB_QuerySystemProxy();
+                    if (current.status == PB_SYSTEM_PROXY_OK)
+                    {
+                        lstrcpynW(c.type, L"HTTP", ARRAYSIZE(c.type));
+                        lstrcpynW(c.host, current.host, ARRAYSIZE(c.host));
+                        _snwprintf_s(c.port, ARRAYSIZE(c.port), _TRUNCATE, L"%u", current.port);
+                        W2Ux(c.host, h, sizeof(h));
+                        edited = g_api.EditProxyConfig(c.nativeId, PB_PROXY_HTTP, h,
+                                                       current.port, "", "",
+                                                       c.sendDomain ? TRUE : FALSE);
+                    }
+                    else
+                    {
+                        // The profile can be saved while the VPN is offline; the next
+                        // timer tick will update the existing native config.
+                        edited = TRUE;
+                    }
+                }
+                else
+                    edited = g_api.EditProxyConfig(c.nativeId,
+                                                   (_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
+                                                   h, (unsigned short)_wtoi(c.port), u, p,
+                                                   c.sendDomain ? TRUE : FALSE);
+                if (!edited)
+                {
+                    MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONERROR);
+                    return TRUE;
+                }
+                g_profile.cfg[sel] = c;
+                g_systemProxyKnown = FALSE; g_systemProxyApplied = FALSE;
+                SaveActive(); RefreshServerList(lv); SyncSystemProxy();
+                if (previous.systemProxy && !c.systemProxy)
+                    EnableSystemProxyRules(c.storedId);
                 ListView_SetItemState(lv, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             }
             return TRUE;
@@ -366,7 +482,10 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             g_api.DeleteProxyConfig(g_profile.cfg[sel].nativeId);
             for (int i = sel; i < g_profile.cfgCount - 1; i++) g_profile.cfg[i] = g_profile.cfg[i + 1];
             g_profile.cfgCount--;
+            g_systemProxyKnown = FALSE;
+            g_systemProxyApplied = FALSE;
             SaveActive(); RefreshServerList(lv);
+            SyncSystemProxy();
             return TRUE;
         }
         case IDCANCEL: EndDialog(dlg, 0); return TRUE;
@@ -651,7 +770,8 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 if ((BOOL)r->enabled != checked)
                 {
                     r->enabled = checked ? 1 : 0;
-                    if (r->enabled) g_api.EnableRule(r->nativeId); else g_api.DisableRule(r->nativeId);
+                    if (r->enabled && !RuleSystemProxyUnavailable(r)) g_api.EnableRule(r->nativeId);
+                    else g_api.DisableRule(r->nativeId);
                     SaveActive();
                 }
             }

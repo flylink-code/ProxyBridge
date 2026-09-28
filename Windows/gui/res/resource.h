@@ -87,6 +87,7 @@
 #define IDC_SE_NAME                327   // friendly name edit
 #define IDC_SE_L_NAME              337   // "Name:" label
 #define IDC_SE_SENDDOMAIN          328   // "let proxy resolve DNS" checkbox
+#define IDC_SE_SYSTEM             329   // use current Windows system proxy
 
 // Proxy Checker dialog
 #define IDD_CHECKER                340
