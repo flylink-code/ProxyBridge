@@ -164,6 +164,11 @@ static void SyncSystemProxy(void)
                 applied = FALSE;
             else if (g_api.SetProxyUpstream)
             {
+                if (c->upstreamStoredId)
+                {
+                    UINT32 upNativeId = ResolveNativeCfg(c->upstreamStoredId);
+                    g_api.SetProxyUpstream(c->nativeId, upNativeId);
+                }
                 for (int j = 0; j < g_profile.cfgCount; j++)
                 {
                     PBConfig* sub = &g_profile.cfg[j];

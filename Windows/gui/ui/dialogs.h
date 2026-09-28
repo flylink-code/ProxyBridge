@@ -160,7 +160,7 @@ static void UpdateServerDialogControlStates(HWND dlg)
 
     HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
     int count = (int)SendMessageW(cbUp, CB_GETCOUNT, 0, 0);
-    if (systemProxy || count <= 0)
+    if (count <= 0)
     {
         CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_UNCHECKED);
         EnableWindow(GetDlgItem(dlg, IDC_SE_UPSTREAM_CHECK), FALSE);
@@ -268,7 +268,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             BOOL on = IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED;
             if (on)
             {
-                CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_UNCHECKED);
                 PBSystemProxy current = PB_QuerySystemProxy();
                 if (current.status == PB_SYSTEM_PROXY_OK)
                 {
@@ -282,9 +281,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         case IDC_SE_UPSTREAM_CHECK:
         {
-            BOOL on = IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) == BST_CHECKED;
-            if (on)
-                CheckDlgButton(dlg, IDC_SE_SYSTEM, BST_UNCHECKED);
             UpdateServerDialogControlStates(dlg);
             return TRUE;
         }
@@ -297,11 +293,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         {
             PBConfig* c = (PBConfig*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
             c->systemProxy = (IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED) ? 1 : 0;
-            if (c->systemProxy || IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) != BST_CHECKED)
-            {
-                c->upstreamStoredId = 0;
-            }
-            else
+            if (IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) == BST_CHECKED)
             {
                 HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
                 int curSel = (int)SendMessageW(cbUp, CB_GETCURSEL, 0, 0);
@@ -309,6 +301,10 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     c->upstreamStoredId = (UINT32)SendMessageW(cbUp, CB_GETITEMDATA, curSel, 0);
                 else
                     c->upstreamStoredId = 0;
+            }
+            else
+            {
+                c->upstreamStoredId = 0;
             }
             int isHttp = c->systemProxy ||
                          (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0) == 1;
