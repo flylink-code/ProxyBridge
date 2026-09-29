@@ -159,20 +159,26 @@ static void UpdateServerDialogControlStates(HWND dlg)
     }
 
     HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
+    HWND btnUpTest = GetDlgItem(dlg, IDC_SE_UPSTREAM_TEST);
     int count = (int)SendMessageW(cbUp, CB_GETCOUNT, 0, 0);
     if (count <= 0)
     {
         CheckDlgButton(dlg, IDC_SE_UPSTREAM_CHECK, BST_UNCHECKED);
         EnableWindow(GetDlgItem(dlg, IDC_SE_UPSTREAM_CHECK), FALSE);
         EnableWindow(cbUp, FALSE);
+        if (btnUpTest) EnableWindow(btnUpTest, FALSE);
     }
     else
     {
         EnableWindow(GetDlgItem(dlg, IDC_SE_UPSTREAM_CHECK), TRUE);
         BOOL upChecked = IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) == BST_CHECKED;
         EnableWindow(cbUp, upChecked);
+        if (btnUpTest) EnableWindow(btnUpTest, upChecked);
     }
 }
+
+// Forward declarations
+INT_PTR CALLBACK CheckerDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp);
 
 // Edit sub-dialog. lParam is a PBConfig* seeded with current values (or zeroed for a new one);
 // on OK it is written back and the dialog returns 1.
@@ -198,6 +204,8 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_SE_L_PASS,   T(S_L_PASS));
         SetDlgItemTextW(dlg, IDC_SE_G_UPSTREAM, T(S_G_UPSTREAM));
         SetDlgItemTextW(dlg, IDC_SE_UPSTREAM_CHECK, T(S_CHK_UPSTREAM));
+        SetDlgItemTextW(dlg, IDC_SE_UPSTREAM_TEST, T(S_BTN_TEST));
+        SetDlgItemTextW(dlg, IDC_SE_TEST,          T(S_BTN_TEST_DOTS));
         SetDlgItemTextW(dlg, IDOK,            T(S_BTN_OK));
         SetDlgItemTextW(dlg, IDCANCEL,        T(S_BTN_CANCEL));
         HWND pr = GetDlgItem(dlg, IDC_SE_PROTO);
@@ -289,6 +297,205 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             UpdateServerDialogControlStates(dlg);
             return TRUE;
         }
+        case IDC_SE_UPSTREAM_TEST:
+        {
+            HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
+            int curSel = (int)SendMessageW(cbUp, CB_GETCURSEL, 0, 0);
+            if (curSel == CB_ERR) return TRUE;
+            UINT32 upStoredId = (UINT32)SendMessageW(cbUp, CB_GETITEMDATA, curSel, 0);
+            if (upStoredId == 0) return TRUE;
+
+            PBConfig* upCfg = NULL;
+            for (int i = 0; i < g_profile.cfgCount; i++)
+            {
+                if (g_profile.cfg[i].storedId == upStoredId)
+                {
+                    upCfg = &g_profile.cfg[i];
+                    break;
+                }
+            }
+            if (!upCfg) return TRUE;
+
+            if (upCfg->nativeId != 0)
+            {
+                DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_CHECKER), dlg, CheckerDlgProc, (LPARAM)upCfg->nativeId);
+            }
+            else
+            {
+                char hostA[256] = {0};
+                UINT16 port = (UINT16)_wtoi(upCfg->port);
+                PBProxyType pt = (_wcsicmp(upCfg->type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
+                if (upCfg->systemProxy)
+                {
+                    PBSystemProxy curSys = PB_QuerySystemProxy();
+                    if (curSys.status == PB_SYSTEM_PROXY_OK)
+                    {
+                        WideCharToMultiByte(CP_ACP, 0, curSys.host, -1, hostA, sizeof(hostA), NULL, NULL);
+                        port = curSys.port;
+                    }
+                    else
+                    {
+                        WideCharToMultiByte(CP_ACP, 0, upCfg->host, -1, hostA, sizeof(hostA), NULL, NULL);
+                    }
+                    pt = PB_PROXY_HTTP;
+                }
+                else
+                {
+                    WideCharToMultiByte(CP_ACP, 0, upCfg->host, -1, hostA, sizeof(hostA), NULL, NULL);
+                }
+
+                char userA[128] = {0}, passA[128] = {0};
+                if (upCfg->user[0]) WideCharToMultiByte(CP_ACP, 0, upCfg->user, -1, userA, sizeof(userA), NULL, NULL);
+                if (upCfg->pass[0]) WideCharToMultiByte(CP_ACP, 0, upCfg->pass, -1, passA, sizeof(passA), NULL, NULL);
+
+                UINT32 tempId = g_api.AddProxyConfig(pt, hostA, port, userA[0] ? userA : NULL, passA[0] ? passA : NULL, upCfg->sendDomain);
+                if (tempId != 0)
+                {
+                    DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_CHECKER), dlg, CheckerDlgProc, (LPARAM)tempId);
+                    g_api.DeleteProxyConfig(tempId);
+                }
+                else
+                {
+                    MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONWARNING);
+                }
+            }
+            return TRUE;
+        }
+        case IDC_SE_TEST:
+        {
+            BOOL isSys = (IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED);
+            char hostA[256] = {0};
+            UINT16 port = 0;
+            PBProxyType pt = PB_PROXY_HTTP;
+            char userA[128] = {0}, passA[128] = {0};
+            BOOL sendDomain = (IsDlgButtonChecked(dlg, IDC_SE_SENDDOMAIN) == BST_CHECKED);
+
+            if (isSys)
+            {
+                PBSystemProxy curSys = PB_QuerySystemProxy();
+                if (curSys.status == PB_SYSTEM_PROXY_OK)
+                {
+                    WideCharToMultiByte(CP_ACP, 0, curSys.host, -1, hostA, sizeof(hostA), NULL, NULL);
+                    port = curSys.port;
+                }
+                else
+                {
+                    wchar_t wh[256]; GetDlgItemTextW(dlg, IDC_SE_ADDR, wh, 256);
+                    WideCharToMultiByte(CP_ACP, 0, wh, -1, hostA, sizeof(hostA), NULL, NULL);
+                    port = (UINT16)GetDlgItemInt(dlg, IDC_SE_PORT, NULL, FALSE);
+                }
+                pt = PB_PROXY_HTTP;
+            }
+            else
+            {
+                wchar_t wh[256]; GetDlgItemTextW(dlg, IDC_SE_ADDR, wh, 256);
+                if (!wh[0])
+                {
+                    MessageBoxW(dlg, T(S_ERR_HOST), APP_TITLE, MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                WideCharToMultiByte(CP_ACP, 0, wh, -1, hostA, sizeof(hostA), NULL, NULL);
+                port = (UINT16)GetDlgItemInt(dlg, IDC_SE_PORT, NULL, FALSE);
+                int protoSel = (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0);
+                pt = (protoSel == 1) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
+
+                if (IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED)
+                {
+                    wchar_t wu[128], wpwd[128];
+                    GetDlgItemTextW(dlg, IDC_SE_USER, wu, 128);
+                    GetDlgItemTextW(dlg, IDC_SE_PASS, wpwd, 128);
+                    WideCharToMultiByte(CP_ACP, 0, wu, -1, userA, sizeof(userA), NULL, NULL);
+                    WideCharToMultiByte(CP_ACP, 0, wpwd, -1, passA, sizeof(passA), NULL, NULL);
+                }
+            }
+
+            if (port == 0) port = (pt == PB_PROXY_HTTP) ? 8080 : 1080;
+
+            UINT32 tempUpNativeId = 0;
+            BOOL needDeleteUp = FALSE;
+
+            if (IsDlgButtonChecked(dlg, IDC_SE_UPSTREAM_CHECK) == BST_CHECKED)
+            {
+                HWND cbUp = GetDlgItem(dlg, IDC_SE_UPSTREAM_COMBO);
+                int curSel = (int)SendMessageW(cbUp, CB_GETCURSEL, 0, 0);
+                if (curSel != CB_ERR)
+                {
+                    UINT32 upStoredId = (UINT32)SendMessageW(cbUp, CB_GETITEMDATA, curSel, 0);
+                    if (upStoredId != 0)
+                    {
+                        PBConfig* upCfg = NULL;
+                        for (int i = 0; i < g_profile.cfgCount; i++)
+                        {
+                            if (g_profile.cfg[i].storedId == upStoredId)
+                            {
+                                upCfg = &g_profile.cfg[i];
+                                break;
+                            }
+                        }
+                        if (upCfg)
+                        {
+                            if (upCfg->nativeId != 0)
+                            {
+                                tempUpNativeId = upCfg->nativeId;
+                            }
+                            else
+                            {
+                                char uHost[256] = {0};
+                                UINT16 uPort = (UINT16)_wtoi(upCfg->port);
+                                PBProxyType uPt = (_wcsicmp(upCfg->type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
+                                if (upCfg->systemProxy)
+                                {
+                                    PBSystemProxy cs = PB_QuerySystemProxy();
+                                    if (cs.status == PB_SYSTEM_PROXY_OK)
+                                    {
+                                        WideCharToMultiByte(CP_ACP, 0, cs.host, -1, uHost, sizeof(uHost), NULL, NULL);
+                                        uPort = cs.port;
+                                    }
+                                    else
+                                    {
+                                        WideCharToMultiByte(CP_ACP, 0, upCfg->host, -1, uHost, sizeof(uHost), NULL, NULL);
+                                    }
+                                    uPt = PB_PROXY_HTTP;
+                                }
+                                else
+                                {
+                                    WideCharToMultiByte(CP_ACP, 0, upCfg->host, -1, uHost, sizeof(uHost), NULL, NULL);
+                                }
+                                char uUser[128] = {0}, uPass[128] = {0};
+                                if (upCfg->user[0]) WideCharToMultiByte(CP_ACP, 0, upCfg->user, -1, uUser, sizeof(uUser), NULL, NULL);
+                                if (upCfg->pass[0]) WideCharToMultiByte(CP_ACP, 0, upCfg->pass, -1, uPass, sizeof(uPass), NULL, NULL);
+
+                                tempUpNativeId = g_api.AddProxyConfig(uPt, uHost, uPort, uUser[0] ? uUser : NULL, uPass[0] ? uPass : NULL, upCfg->sendDomain);
+                                if (tempUpNativeId != 0)
+                                    needDeleteUp = TRUE;
+                            }
+                        }
+                    }
+                }
+            }
+
+            UINT32 tempId = g_api.AddProxyConfig(pt, hostA, port, userA[0] ? userA : NULL, passA[0] ? passA : NULL, sendDomain);
+            if (tempId != 0)
+            {
+                if (tempUpNativeId != 0)
+                {
+                    g_api.SetProxyUpstream(tempId, tempUpNativeId);
+                }
+                DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_CHECKER), dlg, CheckerDlgProc, (LPARAM)tempId);
+                g_api.DeleteProxyConfig(tempId);
+            }
+            else
+            {
+                MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONWARNING);
+            }
+
+            if (needDeleteUp && tempUpNativeId != 0)
+            {
+                g_api.DeleteProxyConfig(tempUpNativeId);
+            }
+
+            return TRUE;
+        }
         case IDOK:
         {
             PBConfig* c = (PBConfig*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
@@ -368,22 +575,29 @@ static void CheckerLogCb(const char* line, void* user)
     PostMessageW(dlg, WM_APP_TESTLINE, 0, (LPARAM)w);   // dialog frees it
 }
 typedef struct { HWND dlg; UINT32 id; char host[256]; unsigned short port; } CheckerJob;
+typedef struct { BOOL busy; BOOL closeRequested; } CheckerUiState;
+static volatile LONG g_checkerBusy = 0;
+static BOOL g_checkerCloseRequested = FALSE;
 static DWORD WINAPI CheckerThread(LPVOID p)
 {
     CheckerJob* j = (CheckerJob*)p;
     g_api.TestProxyConfigEx(j->id, j->host, j->port, CheckerLogCb, j->dlg);
-    PostMessageW(j->dlg, WM_APP_TESTDONE, 0, 0);
+    if (IsWindow(j->dlg))
+        PostMessageW(j->dlg, WM_APP_TESTDONE, 0, 0);
+    InterlockedExchange(&g_checkerBusy, 0);
     free(j);
     return 0;
 }
 static void CheckerStart(HWND dlg)
 {
+    if (InterlockedCompareExchange(&g_checkerBusy, 1, 0) != 0)
+        return;
     CheckerJob* j = (CheckerJob*)calloc(1, sizeof(CheckerJob));
-    if (!j) return;
+    if (!j) { InterlockedExchange(&g_checkerBusy, 0); return; }
     j->dlg = dlg;
     j->id  = (UINT32)(UINT_PTR)GetWindowLongPtrW(dlg, GWLP_USERDATA);
     wchar_t wh[256]; GetDlgItemTextW(dlg, IDC_CK_HOST, wh, 256);
-    if (!wh[0]) lstrcpynW(wh, L"www.google.com", 256);
+    if (!wh[0]) lstrcpynW(wh, L"api.ipify.org", 256);
     WideCharToMultiByte(CP_ACP, 0, wh, -1, j->host, sizeof(j->host), NULL, NULL);
     UINT port = GetDlgItemInt(dlg, IDC_CK_PORT, NULL, FALSE);
     if (port == 0 || port > 65535) port = 80;
@@ -391,9 +605,10 @@ static void CheckerStart(HWND dlg)
 
     SetWindowTextW(GetDlgItem(dlg, IDC_CK_LOG), L"");
     EnableWindow(GetDlgItem(dlg, IDC_CK_RETEST), FALSE);
+    EnableWindow(GetDlgItem(dlg, IDCANCEL), FALSE);
     HANDLE t = CreateThread(NULL, 0, CheckerThread, j, 0, NULL);
     if (t) CloseHandle(t);
-    else { free(j); EnableWindow(GetDlgItem(dlg, IDC_CK_RETEST), TRUE); }
+    else { free(j); InterlockedExchange(&g_checkerBusy, 0); EnableWindow(GetDlgItem(dlg, IDC_CK_RETEST), TRUE); }
 }
 
 INT_PTR CALLBACK CheckerDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
@@ -407,7 +622,7 @@ INT_PTR CALLBACK CheckerDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_CK_L_PORT, T(S_L_PORT));
         SetDlgItemTextW(dlg, IDC_CK_RETEST, T(S_BTN_RETEST));
         SetDlgItemTextW(dlg, IDCANCEL, T(S_BTN_CLOSE));
-        SetDlgItemTextW(dlg, IDC_CK_HOST, L"www.google.com");
+        SetDlgItemTextW(dlg, IDC_CK_HOST, L"api.ipify.org");
         SetDlgItemInt(dlg, IDC_CK_PORT, 80, FALSE);
         SendDlgItemMessageW(dlg, IDC_CK_LOG, WM_SETFONT,
                             (WPARAM)(g_hMono ? g_hMono : (HFONT)GetStockObject(ANSI_FIXED_FONT)), TRUE);
@@ -431,6 +646,7 @@ INT_PTR CALLBACK CheckerDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_APP_TESTDONE:
         EnableWindow(GetDlgItem(dlg, IDC_CK_RETEST), TRUE);
+        EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
         return TRUE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDC_CK_RETEST) { CheckerStart(dlg); return TRUE; }

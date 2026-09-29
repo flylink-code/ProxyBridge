@@ -91,6 +91,8 @@
 #define IDC_SE_UPSTREAM_CHECK      338   // "Route via upstream proxy" checkbox
 #define IDC_SE_UPSTREAM_COMBO      339   // upstream proxy dropdown
 #define IDC_SE_G_UPSTREAM          347   // "Upstream Proxy" group box
+#define IDC_SE_UPSTREAM_TEST       348   // test selected upstream proxy
+#define IDC_SE_TEST                349   // test current server config
 
 // Proxy Checker dialog
 #define IDD_CHECKER                340

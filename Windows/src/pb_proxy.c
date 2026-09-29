@@ -359,7 +359,11 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
         s = pb_connect_proxy_chain(cfg);
         if (s == INVALID_SOCKET)
         {
-            TLOG("  [FAIL] Could not establish connection through upstream chain");
+            const char *err = pb_get_last_upstream_error();
+            if (err && err[0])
+                TLOG("  [FAIL] %s", err);
+            else
+                TLOG("  [FAIL] Could not establish connection through upstream chain");
             TLOG(""); TLOG("Testing finished: upstream chain failed.");
             return -1;
         }
@@ -424,7 +428,7 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
                                  target_host);
             if (rn > 0 && send(s, req, rn, 0) == rn)
             {
-                char resp[512]; int got = recv(s, resp, sizeof(resp) - 1, 0);
+                char resp[1024]; int got = recv(s, resp, sizeof(resp) - 1, 0);
                 if (got > 0)
                 {
                     resp[got] = '\0';
@@ -433,7 +437,27 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* 
                         char status[64] = {0};
                         const char* nl = strchr(resp, '\r'); size_t sl = nl ? (size_t)(nl - resp) : 0;
                         if (sl > 0 && sl < sizeof(status)) { memcpy(status, resp, sl); status[sl] = 0; }
-                        TLOG("  Default web page loaded: %s", status[0] ? status : "HTTP response received");
+                        TLOG("  HTTP response: %s", status[0] ? status : "HTTP response received");
+
+                        const char *body = strstr(resp, "\r\n\r\n");
+                        if (body)
+                        {
+                            body += 4;
+                            while (*body == '\r' || *body == '\n' || *body == ' ') body++;
+                            if (*body)
+                            {
+                                char bbuf[128] = {0};
+                                size_t bl = 0;
+                                while (body[bl] && body[bl] != '\r' && body[bl] != '\n' && bl < sizeof(bbuf) - 1)
+                                {
+                                    bbuf[bl] = body[bl];
+                                    bl++;
+                                }
+                                bbuf[bl] = '\0';
+                                if (bbuf[0])
+                                    TLOG("  Public Exit IP / Body: %s", bbuf);
+                            }
+                        }
                     }
                     else TLOG("  Received %d bytes (non-HTTP target)", got);
                 }

@@ -39,6 +39,7 @@ enum {
     S_L_NAME, S_COL_NAME, S_CHK_SENDDOMAIN,
     S_CHK_SYSTEM_PROXY, S_SYSTEM_PROXY_NAME,
     S_G_UPSTREAM, S_CHK_UPSTREAM, S_L_UPSTREAM_NONE, S_COL_UPSTREAM,
+    S_BTN_TEST, S_BTN_TEST_DOTS,
     S_COUNT
 };
 
@@ -202,6 +203,8 @@ static const wchar_t* const g_strings[S_COUNT][2] = {
     /* S_CHK_UPSTREAM       */ { L"Route via upstream proxy", L"通过前置代理转发" },
     /* S_L_UPSTREAM_NONE    */ { L"(Direct / No Upstream)", L"(直连 / 无前置代理)" },
     /* S_COL_UPSTREAM       */ { L"Upstream", L"前置代理" },
+    /* S_BTN_TEST           */ { L"Test", L"测试" },
+    /* S_BTN_TEST_DOTS      */ { L"Test...", L"测试..." },
 };
 
 static const wchar_t* T(int id) { return g_strings[id][g_lang ? 1 : 0]; }

@@ -5,6 +5,25 @@
 
 #define MAX_PROXY_CHAIN_DEPTH 4
 
+#if defined(__GNUC__)
+static __thread char g_last_upstream_error[256] = {0};
+#else
+static __declspec(thread) char g_last_upstream_error[256] = {0};
+#endif
+
+static void pb_set_upstream_error(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(g_last_upstream_error, sizeof(g_last_upstream_error), _TRUNCATE, fmt, ap);
+    va_end(ap);
+}
+
+static PB_FORCEINLINE const char* pb_get_last_upstream_error(void)
+{
+    return g_last_upstream_error;
+}
+
 // Helper: exact match find for upstream config lookup (no fallback)
 static PB_FORCEINLINE const PROXY_CONFIG* pb_find_proxy_config_exact(UINT32 config_id)
 {
@@ -52,6 +71,7 @@ static int pb_upstream_http_connect(SOCKET s, const char *target_host, UINT16 ta
 
     if (req_len <= 0 || send_all(s, request, req_len) != req_len)
     {
+        pb_set_upstream_error("Failed to send CONNECT request to upstream %s:%u", upstream->host, upstream->port);
         log_message("[UPSTREAM] Failed to send CONNECT to upstream %s:%u", upstream->host, upstream->port);
         return -1;
     }
@@ -68,6 +88,7 @@ static int pb_upstream_http_connect(SOCKET s, const char *target_host, UINT16 ta
         int n = recv(s, &ch, 1, 0);
         if (n <= 0)
         {
+            pb_set_upstream_error("Upstream %s:%u closed connection while waiting for CONNECT response", upstream->host, upstream->port);
             log_message("[UPSTREAM] Failed to receive CONNECT response from upstream %s:%u", upstream->host, upstream->port);
             return -1;
         }
@@ -92,6 +113,7 @@ static int pb_upstream_http_connect(SOCKET s, const char *target_host, UINT16 ta
 
     if (state != 4)
     {
+        pb_set_upstream_error("Upstream %s:%u returned invalid HTTP header", upstream->host, upstream->port);
         log_message("[UPSTREAM] Header too large or invalid from %s:%u", upstream->host, upstream->port);
         return -1;
     }
@@ -100,6 +122,7 @@ static int pb_upstream_http_connect(SOCKET s, const char *target_host, UINT16 ta
     const char *sp = strchr(status_line, ' ');
     if (!sp || atoi(sp + 1) != 200)
     {
+        pb_set_upstream_error("Upstream %s:%u rejected CONNECT (%s)", upstream->host, upstream->port, status_line);
         log_message("[UPSTREAM] CONNECT rejected by %s:%u: %s", upstream->host, upstream->port, status_line);
         return -1;
     }
@@ -112,6 +135,7 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
 {
     if (!proxy || depth > MAX_PROXY_CHAIN_DEPTH)
     {
+        pb_set_upstream_error("Proxy chain depth limit reached or null proxy");
         log_message("[UPSTREAM] Chain depth exceeded limit (%d) or null proxy", depth);
         return INVALID_SOCKET;
     }
@@ -121,10 +145,18 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
     {
         // Direct connection to the target proxy
         UINT32 proxy_ip = proxy->resolved_ip ? proxy->resolved_ip : resolve_hostname(proxy->host);
-        if (proxy_ip == 0) return INVALID_SOCKET;
+        if (proxy_ip == 0)
+        {
+            pb_set_upstream_error("Could not resolve proxy host '%s'", proxy->host);
+            return INVALID_SOCKET;
+        }
 
         SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
-        if (s == INVALID_SOCKET) return INVALID_SOCKET;
+        if (s == INVALID_SOCKET)
+        {
+            pb_set_upstream_error("Failed to create socket");
+            return INVALID_SOCKET;
+        }
 
         configure_tcp_socket(s, 4194304, 30000);
 
@@ -136,6 +168,7 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
 
         if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
         {
+            pb_set_upstream_error("Could not connect to proxy %s:%u (error %d)", proxy->host, proxy->port, WSAGetLastError());
             closesocket(s);
             return INVALID_SOCKET;
         }
@@ -150,7 +183,11 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
     if (upstream->type == PROXY_TYPE_HTTP)
         rc = pb_upstream_http_connect(s, proxy->host, proxy->port, upstream);
     else
+    {
         rc = socks5_connect_domain(s, proxy->host, proxy->port, upstream);
+        if (rc != 0)
+            pb_set_upstream_error("Upstream SOCKS5 %s:%u handshake failed (code %d)", upstream->host, upstream->port, rc);
+    }
 
     if (rc != 0)
     {
@@ -166,6 +203,7 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
 // Public helper to establish a connected socket to the target proxy
 static PB_FORCEINLINE SOCKET pb_connect_proxy_chain(const PROXY_CONFIG *proxy)
 {
+    g_last_upstream_error[0] = '\0';
     return pb_connect_proxy_chain_internal(proxy, 0);
 }
 
