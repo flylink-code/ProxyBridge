@@ -508,6 +508,18 @@ BOOL is_broadcast_or_multicast(UINT32 ip)
     return FALSE;
 }
 
+// A proxy rule with no named executable matches nobody. "*" and "ANY" mean
+// every process, so they are not a named program either. Direct and block
+// rules still use those values as a catch-all.
+static BOOL proxy_rule_without_process(const PROCESS_RULE *rule)
+{
+    const char *name;
+    if (rule->action != RULE_ACTION_PROXY)
+        return FALSE;
+    name = rule->process_name;
+    return name[0] == '\0' || strcmp(name, "*") == 0 || strcmp(name, "ANY") == 0;
+}
+
 // Unified rule matching function for both TCP and UDP
 // Matches rules by process name, IP, port, and protocol
 // Inner matcher - caller MUST hold g_rules_lock (shared) for the whole traversal so
@@ -546,6 +558,12 @@ RuleAction match_rule_inner(const char *process_name, UINT32 dest_ip, UINT16 des
                 rule = rule->next;
                 continue;
             }
+        }
+
+        if (proxy_rule_without_process(rule))
+        {
+            rule = rule->next;
+            continue;
         }
 
         // Check if this is a wildcard process rule
@@ -650,6 +668,12 @@ RuleAction match_rule_v6_inner(const char *process_name, const UINT8 dest_ip6[16
         {
             if (rule->protocol == RULE_PROTOCOL_TCP && is_udp) { rule = rule->next; continue; }
             if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp) { rule = rule->next; continue; }
+        }
+
+        if (proxy_rule_without_process(rule))
+        {
+            rule = rule->next;
+            continue;
         }
 
         BOOL is_wildcard_process = (strcmp(rule->process_name, "*") == 0 || strcmp(rule->process_name, "ANY") == 0);
@@ -758,7 +782,7 @@ RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest_ip, UI
 
 PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, const char* target_domains, RuleProtocol protocol, RuleAction action, UINT32 proxy_config_id)
 {
-    if (process_name == NULL || process_name[0] == '\0')
+    if (process_name == NULL)
         return 0;
 
     PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));

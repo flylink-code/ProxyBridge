@@ -275,25 +275,25 @@ static void ApplyConfigs(void)
                 systemProxyRead = TRUE;
                 LogSystemProxyStatus(&systemProxy);
             }
+            if (!c->type[0])
+                lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
             if (!systemProxyValid)
             {
                 // Keep a stable native config ID so rules never fall back to another proxy.
                 // Its rules are disabled below until a real system endpoint appears.
-                lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
                 char placeholderHost[] = "127.0.0.1";
-                c->nativeId = g_api.AddProxyConfig(PB_PROXY_HTTP, placeholderHost, 1,
+                c->nativeId = g_api.AddProxyConfig(PB_TypeFromText(c->type), placeholderHost, 1,
                                                    "", "", c->sendDomain ? TRUE : FALSE);
                 if (c->storedId == 0) c->storedId = c->nativeId;
                 if (c->nativeId == 0) systemProxyApplied = FALSE;
                 continue;
             }
 
-            lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
             lstrcpynW(c->host, systemProxy.host, ARRAYSIZE(c->host));
             _snwprintf_s(c->port, ARRAYSIZE(c->port), _TRUNCATE, L"%u", systemProxy.port);
         }
 
-        int type = (_wcsicmp(c->type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
+        PBProxyType type = PB_TypeFromText(c->type);
         char h[256], u[256], p[256];
         W2Ux(c->host, h, sizeof(h));
         if (c->systemProxy) { u[0] = 0; p[0] = 0; }

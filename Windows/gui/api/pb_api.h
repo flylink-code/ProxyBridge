@@ -10,6 +10,11 @@
 
 // enums (must match ProxyBridge.h)
 typedef enum { PB_PROXY_HTTP = 0, PB_PROXY_SOCKS5 = 1 } PBProxyType;
+
+static PBProxyType PB_TypeFromText(const wchar_t* type)
+{
+    return (type != NULL && lstrcmpiW(type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
+}
 typedef enum { PB_ACTION_PROXY = 0, PB_ACTION_DIRECT = 1, PB_ACTION_BLOCK = 2 } PBRuleAction;
 typedef enum { PB_PROTO_TCP = 0, PB_PROTO_UDP = 1, PB_PROTO_BOTH = 2 } PBRuleProtocol;
 

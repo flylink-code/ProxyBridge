@@ -124,7 +124,7 @@ static void RefreshServerList(HWND lv)
         ListView_InsertItem(lv, &it);
         ListView_SetItemText(lv, i, 1, c->host[0] ? c->host : (LPWSTR)(c->systemProxy ? T(S_SYSTEM_PROXY_NAME) : L""));
         ListView_SetItemText(lv, i, 2, c->port);
-        ListView_SetItemText(lv, i, 3, c->systemProxy ? (LPWSTR)T(S_SYSTEM_PROXY_NAME) : c->type);
+        ListView_SetItemText(lv, i, 3, c->type[0] ? c->type : (LPWSTR)L"HTTP");
 
         const wchar_t* upText = L"-";
         if (c->upstreamStoredId != 0)
@@ -145,7 +145,7 @@ static void UpdateServerDialogControlStates(HWND dlg)
 {
     BOOL systemProxy = IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED;
     const int manualControls[] = {
-        IDC_SE_ADDR, IDC_SE_PORT, IDC_SE_PROTO, IDC_SE_AUTH,
+        IDC_SE_ADDR, IDC_SE_PORT, IDC_SE_AUTH,
         IDC_SE_USER, IDC_SE_PASS, IDC_SE_SENDDOMAIN
     };
     for (size_t i = 0; i < ARRAYSIZE(manualControls); i++)
@@ -281,7 +281,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 {
                     SetDlgItemTextW(dlg, IDC_SE_ADDR, current.host);
                     SetDlgItemInt(dlg, IDC_SE_PORT, current.port, FALSE);
-                    SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_SETCURSEL, 1, 0);
                 }
             }
             UpdateServerDialogControlStates(dlg);
@@ -337,7 +336,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     {
                         WideCharToMultiByte(CP_ACP, 0, upCfg->host, -1, hostA, sizeof(hostA), NULL, NULL);
                     }
-                    pt = PB_PROXY_HTTP;
                 }
                 else
                 {
@@ -366,7 +364,8 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             BOOL isSys = (IsDlgButtonChecked(dlg, IDC_SE_SYSTEM) == BST_CHECKED);
             char hostA[256] = {0};
             UINT16 port = 0;
-            PBProxyType pt = PB_PROXY_HTTP;
+            int protoSel = (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0);
+            PBProxyType pt = (protoSel == 1) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
             char userA[128] = {0}, passA[128] = {0};
             BOOL sendDomain = (IsDlgButtonChecked(dlg, IDC_SE_SENDDOMAIN) == BST_CHECKED);
 
@@ -384,7 +383,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     WideCharToMultiByte(CP_ACP, 0, wh, -1, hostA, sizeof(hostA), NULL, NULL);
                     port = (UINT16)GetDlgItemInt(dlg, IDC_SE_PORT, NULL, FALSE);
                 }
-                pt = PB_PROXY_HTTP;
             }
             else
             {
@@ -396,8 +394,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 WideCharToMultiByte(CP_ACP, 0, wh, -1, hostA, sizeof(hostA), NULL, NULL);
                 port = (UINT16)GetDlgItemInt(dlg, IDC_SE_PORT, NULL, FALSE);
-                int protoSel = (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0);
-                pt = (protoSel == 1) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
 
                 if (IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED)
                 {
@@ -455,7 +451,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                                     {
                                         WideCharToMultiByte(CP_ACP, 0, upCfg->host, -1, uHost, sizeof(uHost), NULL, NULL);
                                     }
-                                    uPt = PB_PROXY_HTTP;
                                 }
                                 else
                                 {
@@ -513,8 +508,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             {
                 c->upstreamStoredId = 0;
             }
-            int isHttp = c->systemProxy ||
-                         (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0) == 1;
+            int isHttp = (int)SendMessageW(GetDlgItem(dlg, IDC_SE_PROTO), CB_GETCURSEL, 0, 0) == 1;
             lstrcpynW(c->type, isHttp ? L"HTTP" : L"SOCKS5", 16);
             GetDlgItemTextW(dlg, IDC_SE_NAME, c->name, 128);
             GetDlgItemTextW(dlg, IDC_SE_ADDR, c->host, 128);
@@ -537,8 +531,6 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     lstrcpynW(c->host, current.host, ARRAYSIZE(c->host));
                     _snwprintf_s(c->port, ARRAYSIZE(c->port), _TRUNCATE, L"%u", current.port);
                 }
-                c->type[0] = L'H'; c->type[1] = L'T'; c->type[2] = L'T';
-                c->type[3] = L'P'; c->type[4] = 0;
                 c->user[0] = 0;
                 c->pass[0] = 0;
                 if (!c->name[0]) lstrcpynW(c->name, T(S_SYSTEM_PROXY_NAME), ARRAYSIZE(c->name));
@@ -700,25 +692,25 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 if (c.systemProxy)
                 {
                     PBSystemProxy current = PB_QuerySystemProxy();
+                    PBProxyType pt = PB_TypeFromText(c.type);
                     if (current.status == PB_SYSTEM_PROXY_OK)
                     {
-                        lstrcpynW(c.type, L"HTTP", ARRAYSIZE(c.type));
                         lstrcpynW(c.host, current.host, ARRAYSIZE(c.host));
                         _snwprintf_s(c.port, ARRAYSIZE(c.port), _TRUNCATE, L"%u", current.port);
                         W2Ux(c.host, h, sizeof(h));
-                        id = g_api.AddProxyConfig(PB_PROXY_HTTP, h, current.port, "", "",
+                        id = g_api.AddProxyConfig(pt, h, current.port, "", "",
                                                   c.sendDomain ? TRUE : FALSE);
                     }
                     else
                     {
                         // Keep a stable native ID while the VPN is offline; SyncSystemProxy
                         // will replace this placeholder when a real endpoint appears.
-                        id = g_api.AddProxyConfig(PB_PROXY_HTTP, "127.0.0.1", 1, "", "",
+                        id = g_api.AddProxyConfig(pt, "127.0.0.1", 1, "", "",
                                                   c.sendDomain ? TRUE : FALSE);
                     }
                 }
                 else
-                    id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
+                    id = g_api.AddProxyConfig(PB_TypeFromText(c.type),
                                               h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
                 if (id > 0)
                 {
@@ -755,11 +747,10 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     PBSystemProxy current = PB_QuerySystemProxy();
                     if (current.status == PB_SYSTEM_PROXY_OK)
                     {
-                        lstrcpynW(c.type, L"HTTP", ARRAYSIZE(c.type));
                         lstrcpynW(c.host, current.host, ARRAYSIZE(c.host));
                         _snwprintf_s(c.port, ARRAYSIZE(c.port), _TRUNCATE, L"%u", current.port);
                         W2Ux(c.host, h, sizeof(h));
-                        edited = g_api.EditProxyConfig(c.nativeId, PB_PROXY_HTTP, h,
+                        edited = g_api.EditProxyConfig(c.nativeId, PB_TypeFromText(c.type), h,
                                                        current.port, "", "",
                                                        c.sendDomain ? TRUE : FALSE);
                     }
@@ -771,8 +762,7 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     }
                 }
                 else
-                    edited = g_api.EditProxyConfig(c.nativeId,
-                                                   (_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
+                    edited = g_api.EditProxyConfig(c.nativeId, PB_TypeFromText(c.type),
                                                    h, (unsigned short)_wtoi(c.port), u, p,
                                                    c.sendDomain ? TRUE : FALSE);
                 if (!edited)
@@ -944,7 +934,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         // Seed fields from the rule.
         SetDlgItemTextW(dlg, IDC_RE_NAME,    r->name[0]    ? r->name    : L"ProxyBridge Rule");
         SendDlgItemMessageW(dlg, IDC_RE_APPS, EM_LIMITTEXT, PB_APPS_MAX - 1, 0);
-        SetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc[0]    ? r->proc    : L"*");
+        SetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc);
         SetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts[0]   ? r->hosts   : L"*");
         SetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports[0]   ? r->ports   : L"*");
         SetDlgItemTextW(dlg, IDC_RE_DOMAINS, r->domains[0] ? r->domains : L"*");
@@ -1030,7 +1020,6 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             GetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts,   256);
             GetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports,   128);
             GetDlgItemTextW(dlg, IDC_RE_DOMAINS, r->domains, 256);
-            if (!r->proc[0])    lstrcpynW(r->proc,    L"*", 256);
             if (!r->hosts[0])   lstrcpynW(r->hosts,   L"*", 256);
             if (!r->ports[0])   lstrcpynW(r->ports,   L"*", 128);
             if (!r->domains[0]) lstrcpynW(r->domains, L"*", 256);
@@ -1041,6 +1030,8 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             else if (asel == 1) { lstrcpynW(r->action, L"BLOCK",  16); r->cfgStoredId = 0; }
             else                { lstrcpynW(r->action, L"PROXY",  16);
                                   r->cfgStoredId = (UINT32)SendMessageW(ac, CB_GETITEMDATA, asel, 0); }
+            if (!r->proc[0] && _wcsicmp(r->action, L"PROXY") != 0)
+                lstrcpynW(r->proc, L"*", 256);
             r->enabled = (IsDlgButtonChecked(dlg, IDC_RE_ENABLED) == BST_CHECKED) ? 1 : 0;
             EndDialog(dlg, 1);
             return TRUE;
@@ -1126,7 +1117,7 @@ INT_PTR CALLBACK RulesDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (g_profile.ruleCount >= PB_MAX_RULE) { MessageBoxW(dlg, L"Rule limit reached.", APP_TITLE, MB_OK); return TRUE; }
             PBRule r; ZeroMemory(&r, sizeof(r));
             lstrcpynW(r.name, L"ProxyBridge Rule", 128);
-            lstrcpynW(r.proc, L"*", 256); lstrcpynW(r.hosts, L"*", 256);
+            r.proc[0] = 0; lstrcpynW(r.hosts, L"*", 256);
             lstrcpynW(r.ports, L"*", 128); lstrcpynW(r.domains, L"*", 256);
             lstrcpynW(r.proto, L"BOTH", 8); lstrcpynW(r.action, L"DIRECT", 16); r.enabled = 1;
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_RULE), dlg, RuleEditDlgProc, (LPARAM)&r) == 1)

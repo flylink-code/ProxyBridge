@@ -25,7 +25,7 @@ static void LogSystemProxyStatus(const PBSystemProxy* value)
     {
         wchar_t line[384];
         _snwprintf_s(line, ARRAYSIZE(line), _TRUNCATE,
-                     L"[system proxy] Using HTTP proxy %s:%u.\r\n", value->host, value->port);
+                     L"[system proxy] Using %s:%u.\r\n", value->host, value->port);
         LogStoreAdd(&g_actStore, line);
     }
     else
@@ -196,19 +196,21 @@ static void SyncSystemProxy(void)
         PBConfig* c = &g_profile.cfg[i];
         if (!c->systemProxy) continue;
 
-        lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
+        if (!c->type[0])
+            lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
         lstrcpynW(c->host, current.host, ARRAYSIZE(c->host));
         _snwprintf_s(c->port, ARRAYSIZE(c->port), _TRUNCATE, L"%u", current.port);
 
         char host[256]; W2Ux(current.host, host, sizeof(host));
+        PBProxyType pt = PB_TypeFromText(c->type);
         BOOL applied = FALSE;
         BOOL hadNativeConfig = c->nativeId != 0;
         if (c->nativeId)
-            applied = g_api.EditProxyConfig(c->nativeId, PB_PROXY_HTTP, host, current.port,
+            applied = g_api.EditProxyConfig(c->nativeId, pt, host, current.port,
                                             "", "", c->sendDomain ? TRUE : FALSE);
         else
         {
-            c->nativeId = g_api.AddProxyConfig(PB_PROXY_HTTP, host, current.port,
+            c->nativeId = g_api.AddProxyConfig(pt, host, current.port,
                                                 "", "", c->sendDomain ? TRUE : FALSE);
             if (c->storedId == 0) c->storedId = c->nativeId;
             applied = c->nativeId != 0;

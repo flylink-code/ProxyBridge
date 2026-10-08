@@ -280,6 +280,15 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 sp = ntohs(tcp_header->SrcPort);
                 UINT16 dp = ntohs(tcp_header->DstPort);
 
+                // A new SYN may reuse an ephemeral port whose previous flow was proxied.
+                // Drop that decision and connection before matching, so this process is
+                // checked on its own instead of inheriting the old redirect.
+                if (tcp_header->Syn && !tcp_header->Ack && sp != (UINT16)g_local_relay_port)
+                {
+                    port_clear(sp);
+                    remove_connection(sp, FALSE, TRUE);
+                }
+
                 if (port_is_decided(sp))
                 {
                     if (tcp_header->Fin || tcp_header->Rst) port_clear(sp);
@@ -672,7 +681,14 @@ DWORD WINAPI packet_processor(LPVOID arg)
                 // process instead of a stale one (prevents wrong-app rule matching for
                 // up to PID_CACHE_TTL_MS after a port is recycled).
                 if (tcp_header->Syn && !tcp_header->Ack)
+                {
                     remove_cached_pid(ip_header->SrcAddr, sp, FALSE);
+                    if (sp != (UINT16)g_local_relay_port)
+                    {
+                        port_clear(sp);
+                        remove_connection(sp, FALSE, FALSE);
+                    }
+                }
 
                 if (port_is_decided(sp))
                 {
