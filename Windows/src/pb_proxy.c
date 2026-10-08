@@ -98,12 +98,16 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType typ
         PROXY_CONFIG *cfg = &g_proxy_configs[i];
         if (cfg->config_id == config_id)
         {
-            // Close any open UDP state before changing config
+            // Close any open UDP state before changing config. Socket closes stay
+            // outside the endpoint lock; connect() must not block behind them.
             if (cfg->udp_tcp_ctrl != INVALID_SOCKET)  { closesocket(cfg->udp_tcp_ctrl);  cfg->udp_tcp_ctrl  = INVALID_SOCKET; }
             if (cfg->udp_send_sock != INVALID_SOCKET) { closesocket(cfg->udp_send_sock); cfg->udp_send_sock = INVALID_SOCKET; }
             cfg->udp_connected = FALSE;
 
-            cfg->type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
+            int loggedType = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
+            AcquireSRWLockExclusive(&g_proxy_endpoint_lock);
+            cfg->udp_connected = FALSE;
+            cfg->type = (ProxyType)loggedType;
             cfg->port = proxy_port;
             cfg->send_domain_to_proxy = send_domain_to_proxy;
             strncpy_s(cfg->host, sizeof(cfg->host), proxy_ip, _TRUNCATE);
@@ -112,8 +116,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType typ
             cfg->password[0] = '\0';
             if (username != NULL) strncpy_s(cfg->username, sizeof(cfg->username), username, _TRUNCATE);
             if (password != NULL) strncpy_s(cfg->password, sizeof(cfg->password), password, _TRUNCATE);
+            ReleaseSRWLockExclusive(&g_proxy_endpoint_lock);
 
-            log_message("Edited proxy config ID %u: %s:%u (type %d)", config_id, cfg->host, cfg->port, cfg->type);
+            log_message("Edited proxy config ID %u: %s:%u (type %d)", config_id, proxy_ip, proxy_port, loggedType);
             return TRUE;
         }
     }
@@ -130,23 +135,30 @@ PROXYBRIDGE_API BOOL ProxyBridge_DeleteProxyConfig(UINT32 config_id)
             if (cfg->udp_tcp_ctrl != INVALID_SOCKET)  { closesocket(cfg->udp_tcp_ctrl);  }
             if (cfg->udp_send_sock != INVALID_SOCKET) { closesocket(cfg->udp_send_sock); }
 
-            // Shift remaining entries down
+            // Shift remaining entries down while connect threads copy an endpoint,
+            // so a snapshot cannot tear host/port/resolved_ip across two configs.
+            UINT32 cleared[MAX_PROXY_CONFIGS];
+            int clearedCount = 0;
+            AcquireSRWLockExclusive(&g_proxy_endpoint_lock);
             int remaining = g_proxy_config_count - i - 1;
             if (remaining > 0)
                 memmove(&g_proxy_configs[i], &g_proxy_configs[i + 1], remaining * sizeof(PROXY_CONFIG));
 
             g_proxy_config_count--;
 
-            // Clean up any remaining configs that pointed to this deleted config as upstream
             for (int j = 0; j < g_proxy_config_count; j++)
             {
                 if (g_proxy_configs[j].upstream_config_id == config_id)
                 {
                     g_proxy_configs[j].upstream_config_id = 0;
-                    log_message("Cleared upstream proxy for config ID %u due to deletion of config %u",
-                                g_proxy_configs[j].config_id, config_id);
+                    cleared[clearedCount++] = g_proxy_configs[j].config_id;
                 }
             }
+            ReleaseSRWLockExclusive(&g_proxy_endpoint_lock);
+
+            for (int j = 0; j < clearedCount; j++)
+                log_message("Cleared upstream proxy for config ID %u due to deletion of config %u",
+                            cleared[j], config_id);
 
             log_message("Deleted proxy config ID %u", config_id);
             return TRUE;
@@ -173,7 +185,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyUpstream(UINT32 config_id, UINT32 upstr
 
     if (upstream_config_id == 0)
     {
+        AcquireSRWLockExclusive(&g_proxy_endpoint_lock);
         cfg->upstream_config_id = 0;
+        ReleaseSRWLockExclusive(&g_proxy_endpoint_lock);
         log_message("Cleared upstream proxy for config ID %u", config_id);
         return TRUE;
     }
@@ -219,7 +233,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_SetProxyUpstream(UINT32 config_id, UINT32 upstr
         depth++;
     }
 
+    AcquireSRWLockExclusive(&g_proxy_endpoint_lock);
     cfg->upstream_config_id = upstream_config_id;
+    ReleaseSRWLockExclusive(&g_proxy_endpoint_lock);
     log_message("Set upstream proxy ID %u for config ID %u", upstream_config_id, config_id);
     return TRUE;
 }

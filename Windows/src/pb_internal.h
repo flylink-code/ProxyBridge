@@ -28,7 +28,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024
-#define VERSION "4.0.13-Beta"
+#define VERSION "4.0.14-Beta"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.
@@ -191,6 +191,7 @@ extern PROCESS_RULE *rules_list;
 extern UINT32 g_next_rule_id;
 extern SRWLOCK lock;
 extern SRWLOCK g_rules_lock;
+extern SRWLOCK g_proxy_endpoint_lock;
 extern HANDLE windivert_handle;
 extern HANDLE packet_thread[NUM_PACKET_THREADS];
 extern HANDLE proxy_thread;

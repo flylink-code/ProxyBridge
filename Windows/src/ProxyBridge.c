@@ -24,6 +24,9 @@ SRWLOCK lock;
 // never block the packet path's connection bookkeeping. A zero-initialised SRWLOCK is
 // already in the valid unlocked state, so this is safe to use before ProxyBridge_Start.
 SRWLOCK g_rules_lock;
+// Guards host/port/resolved_ip (and the credentials published with them) so a relay
+// connect copies one consistent endpoint. Zero-initialised, same as g_rules_lock.
+SRWLOCK g_proxy_endpoint_lock;
 HANDLE windivert_handle = INVALID_HANDLE_VALUE;
 HANDLE packet_thread[NUM_PACKET_THREADS] = {NULL};
 HANDLE proxy_thread = NULL;

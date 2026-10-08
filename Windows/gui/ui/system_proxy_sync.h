@@ -104,6 +104,51 @@ static BOOL RebindSystemProxyRules(UINT32 storedId, UINT32 nativeId)
     return rebound;
 }
 
+// A new endpoint is applied only after two identical polls. One mismatched or
+// failed read must not rewrite the live port or disable rules that are already
+// using the last confirmed system proxy.
+static PBSystemProxy g_systemProxyPending;
+static BOOL          g_systemProxyPendingSeen = FALSE;
+static int           g_systemProxyPendingHits = 0;
+
+static BOOL SystemProxySame(const PBSystemProxy* a, const PBSystemProxy* b)
+{
+    if (a->status != b->status) return FALSE;
+    if (a->status != PB_SYSTEM_PROXY_OK) return TRUE;
+    return a->port == b->port && _wcsicmp(a->host, b->host) == 0;
+}
+
+static void ClearSystemProxyPending(void)
+{
+    g_systemProxyPendingSeen = FALSE;
+    g_systemProxyPendingHits = 0;
+    ZeroMemory(&g_systemProxyPending, sizeof(g_systemProxyPending));
+}
+
+static BOOL SystemProxyConfirmed(const PBSystemProxy* current)
+{
+    if (!g_systemProxyPendingSeen || !SystemProxySame(&g_systemProxyPending, current))
+    {
+        g_systemProxyPending = *current;
+        g_systemProxyPendingSeen = TRUE;
+        g_systemProxyPendingHits = 1;
+        return FALSE;
+    }
+    if (g_systemProxyPendingHits < 2)
+        g_systemProxyPendingHits++;
+    return g_systemProxyPendingHits >= 2;
+}
+
+static void SetSystemProxyRuleState(BOOL enable)
+{
+    for (int i = 0; i < g_profile.cfgCount; i++)
+        if (g_profile.cfg[i].systemProxy)
+        {
+            if (enable) EnableSystemProxyRules(g_profile.cfg[i].storedId);
+            else        DisableSystemProxyRules(g_profile.cfg[i].storedId);
+        }
+}
+
 static void SyncSystemProxy(void)
 {
     BOOL hasSystemConfig = FALSE;
@@ -113,32 +158,43 @@ static void SyncSystemProxy(void)
     {
         g_systemProxyKnown = FALSE;
         g_systemProxyApplied = FALSE;
+        ClearSystemProxyPending();
         return;
     }
 
     PBSystemProxy current;
-    BOOL valid = ReadSystemProxy(&current);
-    BOOL changed = !g_systemProxyKnown || current.status != g_systemProxy.status ||
-                   current.error != g_systemProxy.error ||
-                   (valid && (_wcsicmp(current.host, g_systemProxy.host) != 0 ||
-                              current.port != g_systemProxy.port));
-    if (!changed && (!valid || g_systemProxyApplied)) return;
+    ReadSystemProxy(&current);
+    if (!SystemProxyConfirmed(&current))
+        return;
 
-    if (changed) LogSystemProxyStatus(&current);
+    // A failed registry read is not "proxy off". Keep the last confirmed endpoint.
+    if (current.status == PB_SYSTEM_PROXY_QUERY_FAILED)
+        return;
+
+    BOOL valid = (current.status == PB_SYSTEM_PROXY_OK);
+    BOOL endpointChanged = !g_systemProxyKnown || !SystemProxySame(&current, &g_systemProxy);
+    BOOL availabilityChanged = !g_systemProxyKnown || (valid != (g_systemProxyApplied != FALSE));
+    if (!endpointChanged && !availabilityChanged)
+        return;
+
+    if (endpointChanged) LogSystemProxyStatus(&current);
+    BOOL wasApplied = g_systemProxyApplied;
     g_systemProxy = current;
     g_systemProxyKnown = TRUE;
-    g_systemProxyApplied = valid;
 
+    if (!valid)
+    {
+        g_systemProxyApplied = FALSE;
+        if (availabilityChanged)
+            SetSystemProxyRuleState(FALSE);
+        return;
+    }
+
+    BOOL allApplied = TRUE;
     for (int i = 0; i < g_profile.cfgCount; i++)
     {
         PBConfig* c = &g_profile.cfg[i];
         if (!c->systemProxy) continue;
-
-        if (!valid)
-        {
-            DisableSystemProxyRules(c->storedId);
-            continue;
-        }
 
         lstrcpynW(c->type, L"HTTP", ARRAYSIZE(c->type));
         lstrcpynW(c->host, current.host, ARRAYSIZE(c->host));
@@ -177,24 +233,18 @@ static void SyncSystemProxy(void)
                 }
             }
         }
-        if (!applied) g_systemProxyApplied = FALSE;
+        if (!applied) allApplied = FALSE;
     }
 
-    // Treat the shared endpoint as unavailable until every system-proxy config has
-    // been updated. This prevents one failed config from being re-enabled while
-    // the global availability guard is still false.
-    if (!g_systemProxyApplied)
-    {
-        for (int i = 0; i < g_profile.cfgCount; i++)
-            if (g_profile.cfg[i].systemProxy)
-                DisableSystemProxyRules(g_profile.cfg[i].storedId);
-    }
-    else
-    {
-        for (int i = 0; i < g_profile.cfgCount; i++)
-            if (g_profile.cfg[i].systemProxy)
-                EnableSystemProxyRules(g_profile.cfg[i].storedId);
-    }
+    g_systemProxyApplied = allApplied;
+
+    // Toggle rules only when availability changes. A host/port update keeps the
+    // same native config id, so matched apps stay on that config instead of
+    // being disabled and reconnecting against the next port the poll happens to see.
+    if (wasApplied && !g_systemProxyApplied)
+        SetSystemProxyRuleState(FALSE);
+    else if (!wasApplied && g_systemProxyApplied)
+        SetSystemProxyRuleState(TRUE);
 }
 
 #endif // PB_SYSTEM_PROXY_SYNC_H

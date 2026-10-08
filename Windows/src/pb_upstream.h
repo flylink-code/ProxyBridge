@@ -36,6 +36,18 @@ static PB_FORCEINLINE const PROXY_CONFIG* pb_find_proxy_config_exact(UINT32 conf
     return NULL;
 }
 
+// Copy host, port, and resolved_ip together so one connect cannot pair a new
+// port with the previous address. UDP socket fields on the copy are unused.
+static void pb_snapshot_proxy_config(const PROXY_CONFIG *src, PROXY_CONFIG *dst)
+{
+    AcquireSRWLockShared(&g_proxy_endpoint_lock);
+    *dst = *src;
+    ReleaseSRWLockShared(&g_proxy_endpoint_lock);
+    dst->udp_tcp_ctrl = INVALID_SOCKET;
+    dst->udp_send_sock = INVALID_SOCKET;
+    dst->udp_connected = FALSE;
+}
+
 // Perform HTTP CONNECT tunnel handshake through an upstream HTTP proxy.
 // Reads byte-by-byte to find "\r\n\r\n" to avoid buffering any downstream/target data.
 static int pb_upstream_http_connect(SOCKET s, const char *target_host, UINT16 target_port, const PROXY_CONFIG *upstream)
@@ -130,7 +142,9 @@ static int pb_upstream_http_connect(SOCKET s, const char *target_host, UINT16 ta
     return 0;
 }
 
-// Recursively connects through the upstream chain up to MAX_PROXY_CHAIN_DEPTH
+// Recursively connects through the upstream chain up to MAX_PROXY_CHAIN_DEPTH.
+// `proxy` is snapshotted immediately so host, port, and resolved_ip stay paired
+// for this attempt even if the GUI publishes a new system-proxy endpoint.
 static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int depth)
 {
     if (!proxy || depth > MAX_PROXY_CHAIN_DEPTH)
@@ -140,14 +154,17 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
         return INVALID_SOCKET;
     }
 
-    const PROXY_CONFIG *upstream = pb_find_proxy_config_exact(proxy->upstream_config_id);
-    if (!upstream)
+    PROXY_CONFIG snap;
+    pb_snapshot_proxy_config(proxy, &snap);
+
+    const PROXY_CONFIG *upstream_live = pb_find_proxy_config_exact(snap.upstream_config_id);
+    if (!upstream_live)
     {
         // Direct connection to the target proxy
-        UINT32 proxy_ip = proxy->resolved_ip ? proxy->resolved_ip : resolve_hostname(proxy->host);
+        UINT32 proxy_ip = snap.resolved_ip ? snap.resolved_ip : resolve_hostname(snap.host);
         if (proxy_ip == 0)
         {
-            pb_set_upstream_error("Could not resolve proxy host '%s'", proxy->host);
+            pb_set_upstream_error("Could not resolve proxy host '%s'", snap.host);
             return INVALID_SOCKET;
         }
 
@@ -164,35 +181,38 @@ static SOCKET pb_connect_proxy_chain_internal(const PROXY_CONFIG *proxy, int dep
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = proxy_ip;
-        addr.sin_port = htons(proxy->port);
+        addr.sin_port = htons(snap.port);
 
         if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
         {
-            pb_set_upstream_error("Could not connect to proxy %s:%u (error %d)", proxy->host, proxy->port, WSAGetLastError());
+            pb_set_upstream_error("Could not connect to proxy %s:%u (error %d)", snap.host, snap.port, WSAGetLastError());
             closesocket(s);
             return INVALID_SOCKET;
         }
         return s;
     }
 
+    PROXY_CONFIG upstream;
+    pb_snapshot_proxy_config(upstream_live, &upstream);
+
     // Connect to the upstream proxy first
-    SOCKET s = pb_connect_proxy_chain_internal(upstream, depth + 1);
+    SOCKET s = pb_connect_proxy_chain_internal(&upstream, depth + 1);
     if (s == INVALID_SOCKET) return INVALID_SOCKET;
 
     int rc = -1;
-    if (upstream->type == PROXY_TYPE_HTTP)
-        rc = pb_upstream_http_connect(s, proxy->host, proxy->port, upstream);
+    if (upstream.type == PROXY_TYPE_HTTP)
+        rc = pb_upstream_http_connect(s, snap.host, snap.port, &upstream);
     else
     {
-        rc = socks5_connect_domain(s, proxy->host, proxy->port, upstream);
+        rc = socks5_connect_domain(s, snap.host, snap.port, &upstream);
         if (rc != 0)
-            pb_set_upstream_error("Upstream SOCKS5 %s:%u handshake failed (code %d)", upstream->host, upstream->port, rc);
+            pb_set_upstream_error("Upstream SOCKS5 %s:%u handshake failed (code %d)", upstream.host, upstream.port, rc);
     }
 
     if (rc != 0)
     {
         log_message("[UPSTREAM] Handshake to target %s:%u via upstream %s:%u failed",
-                    proxy->host, proxy->port, upstream->host, upstream->port);
+                    snap.host, snap.port, upstream.host, upstream.port);
         closesocket(s);
         return INVALID_SOCKET;
     }

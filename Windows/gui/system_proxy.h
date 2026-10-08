@@ -6,44 +6,11 @@
 #include <wctype.h>
 #include <stdlib.h>
 
-#pragma comment(lib, "wininet.lib")
-
-/* Keep WinINet declarations local: MinGW's wininet.h and winhttp.h expose
-   incompatible declarations for several shared type names. */
-typedef struct {
-    DWORD dwOption;
-    union {
-        DWORD dwValue;
-        LPWSTR pszValue;
-        FILETIME ftValue;
-    } Value;
-} PBInternetPerConnOptionW;
-
-typedef struct {
-    DWORD dwSize;
-    LPWSTR pszConnection;
-    DWORD dwOptionCount;
-    DWORD dwOptionError;
-    PBInternetPerConnOptionW* pOptions;
-} PBInternetPerConnOptionListW;
-
-#define PB_INTERNET_PER_CONN_FLAGS          1
-#define PB_INTERNET_PER_CONN_PROXY_SERVER   2
-#define PB_INTERNET_PER_CONN_AUTOCONFIG_URL 4
-#define PB_PROXY_TYPE_PROXY                0x00000002
-#define PB_PROXY_TYPE_AUTO_PROXY_URL       0x00000004
-#define PB_PROXY_TYPE_AUTO_DETECT          0x00000008
-#define PB_INTERNET_OPTION_PER_CONNECTION_OPTION 75
-#define PB_INTERNET_OPTION_REFRESH          37
-
-typedef void* PBInternetHandle;
-
-__declspec(dllimport) BOOL WINAPI InternetSetOptionW(
-    PBInternetHandle hInternet, DWORD dwOption, LPVOID lpBuffer, DWORD dwBufferLength);
-__declspec(dllimport) BOOL WINAPI InternetQueryOptionW(
-    PBInternetHandle hInternet, DWORD dwOption, LPVOID lpBuffer, LPDWORD lpdwBufferLength);
-
-#pragma comment(linker, "/defaultlib:wininet.lib")
+/* Read the current user's Internet Settings registry values directly.
+   WinINet's INTERNET_OPTION_REFRESH + InternetQueryOption pair is racy in a
+   long-lived process and can alternate between the previous and current
+   endpoint. The registry values are what Windows Settings shows, and this
+   module never modifies them or executes PAC. */
 
 typedef enum {
     PB_SYSTEM_PROXY_OK = 0,
@@ -146,64 +113,61 @@ static PBSystemProxyStatus PB_ParseSystemProxyServer(const wchar_t* server,
         ? PB_SYSTEM_PROXY_OK : PB_SYSTEM_PROXY_INVALID;
 }
 
-static void PB_FreeSystemProxyOption(PBInternetPerConnOptionW* option)
+static BOOL PB_ReadRegistryString(HKEY key, const wchar_t* name, wchar_t* out, DWORD cch)
 {
-    if (option->Value.pszValue)
+    if (cch == 0) return FALSE;
+    out[0] = 0;
+    DWORD type = 0;
+    DWORD bytes = cch * sizeof(wchar_t);
+    LONG rc = RegQueryValueExW(key, name, NULL, &type, (LPBYTE)out, &bytes);
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
     {
-        GlobalFree((HGLOBAL)option->Value.pszValue);
-        option->Value.pszValue = NULL;
+        out[0] = 0;
+        return FALSE;
     }
+    out[cch - 1] = 0;
+    return out[0] != 0;
 }
 
-// 读取当前用户的 WinINet/LAN 静态代理；本模块不会修改系统设置，也不执行 PAC。
+// 读取当前用户的静态系统代理（ProxyEnable / ProxyServer）。不修改系统设置，也不执行 PAC。
 static PBSystemProxy PB_QuerySystemProxy(void)
 {
     PBSystemProxy result;
     ZeroMemory(&result, sizeof(result));
     result.status = PB_SYSTEM_PROXY_QUERY_FAILED;
 
-    PBInternetPerConnOptionW options[3];
-    ZeroMemory(options, sizeof(options));
-    options[0].dwOption = PB_INTERNET_PER_CONN_FLAGS;
-    options[1].dwOption = PB_INTERNET_PER_CONN_PROXY_SERVER;
-    options[2].dwOption = PB_INTERNET_PER_CONN_AUTOCONFIG_URL;
-
-    PBInternetPerConnOptionListW list;
-    ZeroMemory(&list, sizeof(list));
-    list.dwSize = sizeof(list);
-    list.pszConnection = NULL;
-    list.dwOptionCount = ARRAYSIZE(options);
-    list.pOptions = options;
-
-    DWORD size = sizeof(list);
-    // WinINet may cache connection options in a long-lived process. Refresh its
-    // cache before reading; this does not change the user's proxy settings.
-    InternetSetOptionW(NULL, PB_INTERNET_OPTION_REFRESH, NULL, 0);
-    BOOL ok = InternetQueryOptionW(NULL, PB_INTERNET_OPTION_PER_CONNECTION_OPTION,
-                                   &list, &size);
-    if (!ok)
+    HKEY key = NULL;
+    LONG rc = RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+        0, KEY_QUERY_VALUE, &key);
+    if (rc != ERROR_SUCCESS)
     {
-        result.error = GetLastError();
-        PB_FreeSystemProxyOption(&options[1]);
-        PB_FreeSystemProxyOption(&options[2]);
+        result.error = (DWORD)rc;
         return result;
     }
 
-    DWORD flags = options[0].Value.dwValue;
-    const wchar_t* server = options[1].Value.pszValue;
-    BOOL hasPac = (flags & (PB_PROXY_TYPE_AUTO_PROXY_URL | PB_PROXY_TYPE_AUTO_DETECT)) != 0;
+    DWORD proxyEnable = 0;
+    DWORD enableSize = sizeof(proxyEnable);
+    DWORD enableType = 0;
+    if (RegQueryValueExW(key, L"ProxyEnable", NULL, &enableType,
+                         (LPBYTE)&proxyEnable, &enableSize) != ERROR_SUCCESS ||
+        enableType != REG_DWORD)
+        proxyEnable = 0;
 
-    if ((flags & PB_PROXY_TYPE_PROXY) != 0 && server && server[0])
+    wchar_t server[1024];
+    BOOL haveServer = PB_ReadRegistryString(key, L"ProxyServer", server, ARRAYSIZE(server));
+
+    wchar_t autoConfig[1024];
+    BOOL havePac = PB_ReadRegistryString(key, L"AutoConfigURL", autoConfig, ARRAYSIZE(autoConfig));
+
+    RegCloseKey(key);
+
+    if (proxyEnable && haveServer)
         result.status = PB_ParseSystemProxyServer(server, result.host, ARRAYSIZE(result.host), &result.port);
     else
-        result.status = hasPac ? PB_SYSTEM_PROXY_PAC_ONLY : PB_SYSTEM_PROXY_DISABLED;
+        result.status = havePac ? PB_SYSTEM_PROXY_PAC_ONLY : PB_SYSTEM_PROXY_DISABLED;
 
-    PB_FreeSystemProxyOption(&options[1]);
-    PB_FreeSystemProxyOption(&options[2]);
     return result;
 }
 
 #endif // PB_SYSTEM_PROXY_H
-
-// The full WinINet declarations are intentionally not included here: MinGW's
-// wininet.h conflicts with the winhttp.h used by the update checker.
