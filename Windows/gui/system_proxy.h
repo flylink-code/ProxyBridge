@@ -6,6 +6,8 @@
 #include <wctype.h>
 #include <stdlib.h>
 
+#pragma comment(lib, "advapi32.lib")
+
 /* Read the current user's Internet Settings registry values directly.
    WinINet's INTERNET_OPTION_REFRESH + InternetQueryOption pair is racy in a
    long-lived process and can alternate between the previous and current

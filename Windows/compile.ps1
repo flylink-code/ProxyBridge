@@ -266,7 +266,7 @@ if ($success) {
                      "/Fe:ProxyBridge.exe " +
                      "/link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /RELEASE " +
                      "/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT " +
-                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib wininet.lib"
+                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib advapi32.lib winhttp.lib wininet.lib"
 
         # Sources live in subfolders. rc runs from res\ so app.rc's relative paths
         # (resource.h, app.manifest, logo.ico) resolve; it writes app.res back to gui\.
@@ -306,7 +306,7 @@ if ($success) {
                         '-DUNICODE', '-D_UNICODE', '-D_WIN32_WINNT=0x0601', '-DNDEBUG',
                         'gui\main.c', 'gui\profile\profile.c', 'gui\app-gcc.res',
                         '-luser32', '-lgdi32', '-lcomctl32', '-lshell32', '-lcomdlg32',
-                        '-lwinhttp', '-lwininet', '-ldwmapi', '-luxtheme',
+                        '-ladvapi32', '-lwinhttp', '-lwininet', '-ldwmapi', '-luxtheme',
                         '-o', "$OutputDir\ProxyBridge.exe"
                     )
                     Write-Host "Command: $GccPath $($guiGccArgs -join ' ')" -ForegroundColor Gray
