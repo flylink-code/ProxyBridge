@@ -1005,16 +1005,30 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     // DHCP is deliberately excluded at the filter level so those packets never enter
     // ProxyBridge at all. DHCP is link-local broadcast (0.0.0.0 -> 255.255.255.255) and
     // #161  DHCPv4: client 68 / server 67     DHCPv6: client 546 / server 547
+    // Private LAN destinations are also left on the original path. Reinjecting them
+    // makes a local VPN treat the packet as a new flow and tunnel it, so a Direct
+    // decision still cannot reach 192.168.x.x. Relay ports stay captured: the reply
+    // toward this PC is often addressed to its own 192.168 address.
     snprintf(filter, sizeof(filter),
         "not impostor and ("
-        "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
-        "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
+        "(tcp and ((tcp.DstPort == %d or tcp.SrcPort == %d) or "
+            "((outbound or loopback) and "
+                "(ip.DstAddr < 10.0.0.0 or ip.DstAddr > 10.255.255.255) and "
+                "(ip.DstAddr < 172.16.0.0 or ip.DstAddr > 172.31.255.255) and "
+                "(ip.DstAddr < 192.168.0.0 or ip.DstAddr > 192.168.255.255) and "
+                "(ip.DstAddr < 169.254.0.0 or ip.DstAddr > 169.254.255.255))) or "
+        "(udp and ((udp.DstPort == %d or udp.SrcPort == %d) or "
+            "((outbound or loopback) and "
+                "(ip.DstAddr < 10.0.0.0 or ip.DstAddr > 10.255.255.255) and "
+                "(ip.DstAddr < 172.16.0.0 or ip.DstAddr > 172.31.255.255) and "
+                "(ip.DstAddr < 192.168.0.0 or ip.DstAddr > 192.168.255.255) and "
+                "(ip.DstAddr < 169.254.0.0 or ip.DstAddr > 169.254.255.255)) and "
             "udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68) or "
         "(udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
         "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
-            "udp.SrcPort != 546 and udp.DstPort != 546 and udp.SrcPort != 547 and udp.DstPort != 547))",
+            "udp.SrcPort != 546 and udp.DstPort != 546 and udp.SrcPort != 547 and udp.DstPort != 547))))",
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT,
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 
